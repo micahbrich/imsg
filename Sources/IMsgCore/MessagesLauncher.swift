@@ -92,6 +92,13 @@ public final class MessagesLauncher: @unchecked Sendable {
 
     // Wait for server to become available
     try waitForReady(timeout: 15.0)
+
+    // Require a successful ping so status/availability doesn't report a false positive.
+    guard isInjectedAndReady() else {
+      throw MessagesLauncherError.socketError(
+        "Messages helper launched but IPC ping failed. Check container file permissions and helper logs."
+      )
+    }
   }
 
   /// Kill Messages.app if running
