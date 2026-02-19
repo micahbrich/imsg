@@ -75,6 +75,47 @@ public enum IMCoreBridgeError: Error, CustomStringConvertible {
   }
 }
 
+public struct TypingChangeEvent: Sendable, Equatable {
+  public let chatGUID: String
+  public let chatID: String
+  public let handle: String
+  public let isTyping: Bool
+  public let timestamp: String
+
+  public init(
+    chatGUID: String,
+    chatID: String,
+    handle: String,
+    isTyping: Bool,
+    timestamp: String
+  ) {
+    self.chatGUID = chatGUID
+    self.chatID = chatID
+    self.handle = handle
+    self.isTyping = isTyping
+    self.timestamp = timestamp
+  }
+
+  init?(dictionary: [String: Any]) {
+    guard
+      let chatGUID = dictionary["chat_guid"] as? String,
+      let chatID = dictionary["chat_id"] as? String,
+      let handle = dictionary["handle"] as? String,
+      let isTyping = dictionary["is_typing"] as? Bool,
+      let timestamp = dictionary["timestamp"] as? String
+    else {
+      return nil
+    }
+    self.init(
+      chatGUID: chatGUID,
+      chatID: chatID,
+      handle: handle,
+      isTyping: isTyping,
+      timestamp: timestamp
+    )
+  }
+}
+
 /// Bridge to IMCore via DYLD injection into Messages.app
 ///
 /// This bridge communicates with an injected dylib inside Messages.app
@@ -152,14 +193,76 @@ public final class IMCoreBridge: @unchecked Sendable {
     messageGUID: String,
     type: TapbackType
   ) async throws {
+    try await sendReaction(
+      to: handle,
+      messageGUID: messageGUID,
+      associatedMessageType: type.rawValue,
+      emoji: nil
+    )
+  }
+
+  /// Send a reaction to a message with explicit associated message metadata.
+  ///
+  /// - Parameters:
+  ///   - handle: Chat handle/identifier/guid
+  ///   - messageGUID: GUID of the message being reacted to
+  ///   - associatedMessageType: IMCore associated message type (2000-2006 add, 3000-3006 remove)
+  ///   - emoji: Optional custom emoji when type is 2006/3006
+  public func sendReaction(
+    to handle: String,
+    messageGUID: String,
+    associatedMessageType: Int,
+    emoji: String?
+  ) async throws {
     let params =
       [
         "handle": handle,
         "guid": messageGUID,
-        "type": type.rawValue,
+        "type": associatedMessageType,
       ] as [String: Any]
 
-    _ = try await sendCommand(action: "react", params: params)
+    var requestParams = params
+    if let emoji, !emoji.isEmpty {
+      requestParams["emoji"] = emoji
+    }
+
+    _ = try await sendCommand(action: "react", params: requestParams)
+  }
+
+  /// Subscribe to peer typing updates. Optional handle scopes the subscription to one chat.
+  public func subscribeToTyping(handle: String? = nil) async throws -> Int {
+    var params: [String: Any] = [:]
+    if let handle, !handle.isEmpty {
+      params["handle"] = handle
+    }
+    let response = try await sendCommand(action: "typing_subscribe", params: params)
+    if let subscription = response["subscription"] as? Int {
+      return subscription
+    }
+    if let subscription = response["subscription"] as? NSNumber {
+      return subscription.intValue
+    }
+    throw IMCoreBridgeError.operationFailed("typing_subscribe response missing subscription")
+  }
+
+  /// Unsubscribe from peer typing updates.
+  public func unsubscribeFromTyping(subscription: Int) async throws {
+    _ = try await sendCommand(
+      action: "typing_unsubscribe",
+      params: ["subscription": subscription]
+    )
+  }
+
+  /// Poll queued typing events for a subscription.
+  public func pollTyping(subscription: Int) async throws -> [TypingChangeEvent] {
+    let response = try await sendCommand(
+      action: "typing_poll",
+      params: ["subscription": subscription]
+    )
+    guard let rawEvents = response["events"] as? [[String: Any]] else {
+      return []
+    }
+    return rawEvents.compactMap(TypingChangeEvent.init(dictionary:))
   }
 
   /// List all available chats (for debugging)

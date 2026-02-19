@@ -16,7 +16,7 @@ An enhanced macOS Messages.app CLI that adds typing indicators, read receipts, t
 ### 🆕 New imsg-plus Features
 - **Typing indicators** — Show/hide typing bubble with `imsg-plus typing`
 - **Read receipts** — Mark messages as read with `imsg-plus read`
-- **Tapback reactions** — Send reactions (❤️ 👍 👎 😂 ‼️ ❓) with `imsg-plus react`
+- **Tapback reactions** — Send standard reactions or arbitrary emoji (for example 🎉 🤯 🔥) with `imsg-plus react`
 - **Status check** — Verify feature availability with `imsg-plus status`
 - **Launch command** — Start Messages.app with dylib injection in one step
 - **JSON-RPC server** — Programmatic access via `imsg-plus rpc` over stdin/stdout
@@ -56,7 +56,7 @@ make build-dylib
 ### New Commands (imsg-plus)
 - `imsg-plus typing --handle <phone/email> --state on|off` — Control typing indicator
 - `imsg-plus read --handle <phone/email> [--message-guid <guid>]` — Mark messages as read
-- `imsg-plus react --handle <phone/email> --guid <message-guid> --type <reaction> [--remove]` — Send tapback
+- `imsg-plus react --handle <phone/email> --guid <message-guid> --type <reaction-or-emoji> [--remove]` — Send tapback/custom emoji reaction
 - `imsg-plus status` — Check if advanced features are available
 - `imsg-plus launch` — Launch Messages.app with dylib injection
 - `imsg-plus launch --kill-only` — Kill Messages.app without relaunching
@@ -92,6 +92,9 @@ imsg-plus read --handle "+14155551212"
 
 # send a tapback reaction
 imsg-plus react --handle "+14155551212" --guid "ABC-123" --type love
+
+# send a custom emoji reaction
+imsg-plus react --handle "+14155551212" --guid "ABC-123" --type "🎉"
 
 # check feature availability
 imsg-plus status
@@ -131,8 +134,10 @@ imsg-plus rpc [--no-auto-read] [--no-auto-typing]
 | `messages.history` | Fetch message history for a chat |
 | `messages.markRead` | Mark messages as read |
 | `send` | Send a message |
-| `tapback.send` | Send or remove a tapback reaction |
+| `tapback.send` | Send or remove a tapback/custom emoji reaction |
 | `typing.set` | Show/hide typing indicator |
+| `typing.subscribe` | Subscribe to peer typing updates |
+| `typing.unsubscribe` | Unsubscribe from peer typing updates |
 | `watch.subscribe` | Subscribe to new messages |
 | `watch.unsubscribe` | Unsubscribe from messages |
 
@@ -157,6 +162,7 @@ imsg-plus rpc --no-auto-read --no-auto-typing
 {"jsonrpc":"2.0","method":"chats.list","params":{"limit":5},"id":1}
 {"jsonrpc":"2.0","method":"send","params":{"to":"+14155551212","text":"hello"},"id":2}
 {"jsonrpc":"2.0","method":"tapback.send","params":{"handle":"+14155551212","guid":"ABC-123","type":"love"},"id":3}
+{"jsonrpc":"2.0","method":"tapback.send","params":{"handle":"+14155551212","guid":"ABC-123","type":"🎉"},"id":4}
 ```
 
 ### `send` chat routing
@@ -178,6 +184,7 @@ Use **either** `to` **or** one of the `chat_*` parameters — not both. The `cha
 ## JSON output
 `imsg-plus chats --json` emits one JSON object per chat with fields: `id`, `name`, `identifier`, `service`, `last_message_at`.
 `imsg-plus history --json` and `imsg-plus watch --json` emit one JSON object per message with fields: `id`, `chat_id`, `guid`, `reply_to_guid`, `sender`, `is_from_me`, `text`, `created_at`, `attachments` (array of metadata with `filename`, `transfer_name`, `uti`, `mime_type`, `total_bytes`, `is_sticker`, `original_path`, `missing`), `reactions`.
+When using `imsg-plus watch --typing --json`, typing updates are emitted as objects with `type: "typing"` and fields `chat_guid`, `chat_id`, `handle`, `is_typing`, `timestamp`.
 
 Note: `reply_to_guid` and `reactions` are read-only metadata.
 

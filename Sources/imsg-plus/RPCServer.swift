@@ -19,6 +19,7 @@ final class RPCServer {
   private let bridgeAvailable: Bool
   private var nextSubscriptionID = 1
   private var subscriptions: [Int: Task<Void, Never>] = [:]
+  private var typingSubscriptions: [Int: TypingSubscription] = [:]
 
   init(
     store: MessageStore,
@@ -49,6 +50,15 @@ final class RPCServer {
     for task in subscriptions.values {
       task.cancel()
     }
+    for subscription in typingSubscriptions.values {
+      subscription.task.cancel()
+      if bridgeAvailable {
+        try? await IMCoreBridge.shared.unsubscribeFromTyping(
+          subscription: subscription.helperSubscription
+        )
+      }
+    }
+    typingSubscriptions.removeAll()
   }
 
   func handleLineForTesting(_ line: String) async {
@@ -221,6 +231,10 @@ final class RPCServer {
           task.cancel()
         }
         respond(id: id, result: ["ok": true])
+      case "typing.subscribe", "typing_subscribe":
+        try await handleTypingSubscribe(params: params, id: id)
+      case "typing.unsubscribe", "typing_unsubscribe":
+        try await handleTypingUnsubscribe(params: params, id: id)
       case "send":
         try await handleSend(params: params, id: id)
       case "typing.set":
@@ -252,6 +266,113 @@ final class RPCServer {
   private func respond(id: Any?, result: Any) {
     guard let id else { return }
     output.sendResponse(id: id, result: result)
+  }
+
+  private func handleTypingSubscribe(params: [String: Any], id: Any?) async throws {
+    guard bridgeAvailable else {
+      throw RPCError.internalError("IMCoreBridge not available")
+    }
+
+    var resolvedChatIdentifier = stringParam(params["chat_identifier"]) ?? ""
+    var resolvedChatGUID = stringParam(params["chat_guid"]) ?? ""
+    let directHandle = stringParam(params["handle"]) ?? ""
+
+    if let chatID = int64Param(params["chat_id"]) {
+      guard let info = try cache.info(chatID: chatID) else {
+        throw RPCError.invalidParams("unknown chat_id \(chatID)")
+      }
+      resolvedChatIdentifier = info.identifier
+      resolvedChatGUID = info.guid
+    }
+
+    let handle: String? = {
+      if !directHandle.isEmpty { return directHandle }
+      return resolveTypingHandle(
+        recipient: "",
+        chatIdentifier: resolvedChatIdentifier,
+        chatGUID: resolvedChatGUID
+      )
+    }()
+
+    let helperSubscription = try await IMCoreBridge.shared.subscribeToTyping(handle: handle)
+    let subscriptionID = nextSubscriptionID
+    nextSubscriptionID += 1
+
+    let localOutput = output
+    let localVerbose = verbose
+    let task = Task {
+      while !Task.isCancelled {
+        do {
+          let events = try await IMCoreBridge.shared.pollTyping(subscription: helperSubscription)
+          for event in events {
+            localOutput.sendNotification(
+              method: "typing.changed",
+              params: [
+                "subscription": subscriptionID,
+                "chat_guid": event.chatGUID,
+                "chat_id": event.chatID,
+                "handle": event.handle,
+                "is_typing": event.isTyping,
+                "timestamp": event.timestamp,
+              ]
+            )
+          }
+          try await Task.sleep(nanoseconds: 350_000_000)
+        } catch {
+          if Task.isCancelled { break }
+          localOutput.sendNotification(
+            method: "error",
+            params: [
+              "subscription": subscriptionID,
+              "error": ["message": "typing poll failed: \(error)"],
+            ]
+          )
+          break
+        }
+      }
+      try? await IMCoreBridge.shared.unsubscribeFromTyping(subscription: helperSubscription)
+      if localVerbose {
+        FileHandle.standardError.write(
+          Data("[typing] subscription \(subscriptionID) ended\n".utf8))
+      }
+    }
+
+    typingSubscriptions[subscriptionID] = TypingSubscription(
+      helperSubscription: helperSubscription,
+      task: task
+    )
+
+    var result: [String: Any] = [
+      "subscription": subscriptionID,
+      "helper_subscription": helperSubscription,
+    ]
+    if let handle, !handle.isEmpty {
+      result["handle"] = handle
+    }
+    respond(id: id, result: result)
+  }
+
+  private func handleTypingUnsubscribe(params: [String: Any], id: Any?) async throws {
+    guard let subscriptionID = intParam(params["subscription"]) else {
+      throw RPCError.invalidParams("subscription is required")
+    }
+    guard let subscription = typingSubscriptions.removeValue(forKey: subscriptionID) else {
+      throw RPCError.invalidParams("unknown typing subscription \(subscriptionID)")
+    }
+
+    subscription.task.cancel()
+    if bridgeAvailable {
+      try? await IMCoreBridge.shared.unsubscribeFromTyping(
+        subscription: subscription.helperSubscription
+      )
+    }
+
+    respond(
+      id: id,
+      result: [
+        "ok": true,
+        "subscription": subscriptionID,
+      ])
   }
 
   private func handleSend(params: [String: Any], id: Any?) async throws {
@@ -392,25 +513,40 @@ final class RPCServer {
     }
     guard let typeStr = stringParam(params["type"]), !typeStr.isEmpty else {
       throw RPCError.invalidParams(
-        "type is required (love, thumbsup, thumbsdown, haha, emphasis, question)")
+        "type is required (alias or literal emoji)")
     }
     let remove = boolParam(params["remove"]) ?? false
-    guard let tapbackType = TapbackType.from(string: typeStr, remove: remove) else {
+    guard let reactionType = ReactionType.parse(typeStr) else {
       throw RPCError.invalidParams(
-        "invalid reaction type: '\(typeStr)'. Valid: love, thumbsup, thumbsdown, haha, emphasis, question"
+        "invalid reaction type: '\(typeStr)'. Valid: love, thumbsup, thumbsdown, haha, emphasis, question, or literal emoji"
       )
     }
     guard bridgeAvailable else {
       throw RPCError.internalError("IMCoreBridge not available")
     }
-    try await IMCoreBridge.shared.sendTapback(to: handle, messageGUID: guid, type: tapbackType)
+    let associatedType =
+      remove
+      ? reactionType.removalAssociatedMessageType : reactionType.associatedMessageType
+    let customEmoji: String? = {
+      if case .custom(let emoji) = reactionType {
+        return emoji
+      }
+      return nil
+    }()
+    try await IMCoreBridge.shared.sendReaction(
+      to: handle,
+      messageGUID: guid,
+      associatedMessageType: associatedType,
+      emoji: customEmoji
+    )
     respond(
       id: id,
       result: [
         "ok": true,
         "handle": handle,
         "guid": guid,
-        "type": tapbackType.displayName,
+        "type": rpcReactionDisplayName(reactionType),
+        "emoji": reactionType.emoji,
         "action": remove ? "removed" : "added",
       ])
   }
@@ -425,6 +561,18 @@ final class RPCServer {
     return nil
   }
 
+}
+
+private func rpcReactionDisplayName(_ reaction: ReactionType) -> String {
+  switch reaction {
+  case .love: return "love"
+  case .like: return "thumbsup"
+  case .dislike: return "thumbsdown"
+  case .laugh: return "haha"
+  case .emphasis: return "emphasis"
+  case .question: return "question"
+  case .custom(let emoji): return emoji
+  }
 }
 
 private func buildMessagePayload(
@@ -444,6 +592,11 @@ private func buildMessagePayload(
     attachments: attachments,
     reactions: reactions
   )
+}
+
+private struct TypingSubscription {
+  let helperSubscription: Int
+  let task: Task<Void, Never>
 }
 
 private final class RPCWriter: RPCOutput, @unchecked Sendable {

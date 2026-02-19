@@ -48,6 +48,23 @@ Params:
 Result:
 - `{ "ok": true }`
 
+### `typing.subscribe`
+Params:
+- `chat_id` (int, optional)
+- `chat_identifier` (string, optional)
+- `chat_guid` (string, optional)
+- `handle` (string, optional)
+Result:
+- `{ "subscription": 2 }`
+Notifications:
+- `{"jsonrpc":"2.0","method":"typing.changed","params":{"subscription":2,"chat_guid":"...","chat_id":"...","handle":"+1555...","is_typing":true,"timestamp":"..."}}`
+
+### `typing.unsubscribe`
+Params:
+- `subscription` (int, required)
+Result:
+- `{ "ok": true }`
+
 ### `send`
 Params (direct):
 - `to` (string, required)

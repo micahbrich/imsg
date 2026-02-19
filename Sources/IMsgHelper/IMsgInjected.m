@@ -22,6 +22,14 @@ static dispatch_source_t fileWatchSource = nil;
 static NSTimer *fileWatchTimer = nil;
 static int lockFd = -1;
 
+// Typing subscription state
+static NSInteger nextTypingSubscriptionID = 1;
+static NSMutableDictionary<NSNumber *, NSMutableDictionary *> *typingSubscriptions = nil;
+static NSMutableDictionary<NSNumber *, NSMutableArray<NSDictionary *> *> *typingEventQueues = nil;
+static NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSNumber *> *> *typingStatesByChat = nil;
+static id typingNotificationObserver = nil;
+static NSTimer *typingFallbackTimer = nil;
+
 static void initFilePaths(void) {
     if (kCommandFile == nil) {
         // Use container path which Messages.app can write to
@@ -241,6 +249,518 @@ static id findChat(NSString *identifier) {
     return nil;
 }
 
+#pragma mark - Typing Subscriptions
+
+static void ensureTypingCollections(void) {
+    if (!typingSubscriptions) {
+        typingSubscriptions = [NSMutableDictionary dictionary];
+    }
+    if (!typingEventQueues) {
+        typingEventQueues = [NSMutableDictionary dictionary];
+    }
+    if (!typingStatesByChat) {
+        typingStatesByChat = [NSMutableDictionary dictionary];
+    }
+}
+
+static NSString *safeString(id value) {
+    if (!value || value == [NSNull null]) { return @""; }
+    if ([value isKindOfClass:[NSString class]]) {
+        return (NSString *)value;
+    }
+    return [[value description] isKindOfClass:[NSString class]] ? [value description] : @"";
+}
+
+static BOOL isBoolLikeNSNumber(NSNumber *value) {
+    if (!value) { return NO; }
+    const char *objCType = [value objCType];
+    return objCType && (strcmp(objCType, @encode(BOOL)) == 0 || strcmp(objCType, @encode(bool)) == 0);
+}
+
+static NSString *handleIdentifierFromObject(id handleObj) {
+    if (!handleObj || handleObj == [NSNull null]) { return @""; }
+    if ([handleObj isKindOfClass:[NSString class]]) {
+        return (NSString *)handleObj;
+    }
+    if ([handleObj respondsToSelector:@selector(ID)]) {
+        id value = [handleObj performSelector:@selector(ID)];
+        return safeString(value);
+    }
+    if ([handleObj respondsToSelector:@selector(identifier)]) {
+        id value = [handleObj performSelector:@selector(identifier)];
+        return safeString(value);
+    }
+    return safeString(handleObj);
+}
+
+static BOOL isLikelyIMChatObject(id value) {
+    if (!value || value == [NSNull null]) { return NO; }
+    if ([NSStringFromClass([value class]) containsString:@"IMChat"]) { return YES; }
+    BOOL hasParticipants = [value respondsToSelector:@selector(participants)];
+    BOOL hasGUID = [value respondsToSelector:@selector(guid)];
+    BOOL hasIdentifier = [value respondsToSelector:@selector(chatIdentifier)];
+    return hasParticipants && (hasGUID || hasIdentifier);
+}
+
+static id chatFromNotification(NSNotification *note) {
+    if (!note) { return nil; }
+    if (isLikelyIMChatObject(note.object)) {
+        return note.object;
+    }
+
+    NSDictionary *userInfo = note.userInfo;
+    if (![userInfo isKindOfClass:[NSDictionary class]] || userInfo.count == 0) {
+        return nil;
+    }
+
+    NSArray<NSString *> *preferredKeys = @[
+        @"chat",
+        @"imchat",
+        @"IMChat",
+        @"_chat",
+        @"chatObject",
+        @"IMChatValue"
+    ];
+    for (NSString *key in preferredKeys) {
+        id candidate = userInfo[key];
+        if (isLikelyIMChatObject(candidate)) {
+            return candidate;
+        }
+    }
+
+    for (id value in userInfo.allValues) {
+        if (isLikelyIMChatObject(value)) {
+            return value;
+        }
+    }
+    return nil;
+}
+
+static NSString *chatGUIDFromChat(id chat) {
+    if (!chat || ![chat respondsToSelector:@selector(guid)]) { return @""; }
+    return safeString([chat performSelector:@selector(guid)]);
+}
+
+static NSString *chatIdentifierFromChat(id chat) {
+    if (!chat || ![chat respondsToSelector:@selector(chatIdentifier)]) { return @""; }
+    return safeString([chat performSelector:@selector(chatIdentifier)]);
+}
+
+static BOOL typingStateFromValue(id value) {
+    if (!value || value == [NSNull null]) { return NO; }
+
+    SEL isTypingSel = NSSelectorFromString(@"isTyping");
+    if ([value respondsToSelector:isTypingSel]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(value, isTypingSel);
+    }
+    SEL typingSel = NSSelectorFromString(@"typing");
+    if ([value respondsToSelector:typingSel]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(value, typingSel);
+    }
+    SEL typingStateSel = NSSelectorFromString(@"typingState");
+    if ([value respondsToSelector:typingStateSel]) {
+        id nested = ((id (*)(id, SEL))objc_msgSend)(value, typingStateSel);
+        return typingStateFromValue(nested);
+    }
+
+    if ([value isKindOfClass:[NSNumber class]]) {
+        NSNumber *number = (NSNumber *)value;
+        if (isBoolLikeNSNumber(number)) {
+            return number.boolValue;
+        }
+        NSInteger raw = number.integerValue;
+        if (raw <= 0) { return NO; }
+        // IMCore typing state enums vary by macOS release.
+        // Keep this permissive to avoid missing active typing states.
+        return YES;
+    }
+    if ([value respondsToSelector:@selector(boolValue)]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(value, @selector(boolValue));
+    }
+    if ([value respondsToSelector:@selector(integerValue)]) {
+        NSInteger raw = ((NSInteger (*)(id, SEL))objc_msgSend)(value, @selector(integerValue));
+        return raw > 0;
+    }
+
+    NSString *desc = safeString(value).lowercaseString;
+    if ([desc isEqualToString:@"0"] || [desc isEqualToString:@"false"]) {
+        return NO;
+    }
+    if ([desc isEqualToString:@"1"] || [desc isEqualToString:@"true"]) {
+        return YES;
+    }
+    if ([desc containsString:@"not typing"] || [desc containsString:@"typing=0"]) {
+        return NO;
+    }
+    if ([desc containsString:@"typing"] || [desc containsString:@"composing"] || [desc containsString:@"started"]) {
+        return YES;
+    }
+    if ([desc containsString:@"cancel"] || [desc containsString:@"idle"] || [desc containsString:@"none"] ||
+        [desc containsString:@"stopped"] || [desc containsString:@"inactive"]) {
+        return NO;
+    }
+    return NO;
+}
+
+static NSDictionary<NSString *, NSNumber *> *typingSnapshotFromStateContainer(id statesObj) {
+    if (!statesObj || statesObj == [NSNull null]) { return @{}; }
+
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    if ([statesObj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *states = (NSDictionary *)statesObj;
+        for (id key in states) {
+            NSString *handle = handleIdentifierFromObject(key);
+            if (handle.length == 0) { continue; }
+            BOOL isTyping = typingStateFromValue(states[key]);
+            result[handle] = @(isTyping);
+        }
+        return result;
+    }
+
+    if ([statesObj isKindOfClass:[NSArray class]]) {
+        for (id entry in (NSArray *)statesObj) {
+            NSString *handle = handleIdentifierFromObject(entry);
+            if (handle.length == 0) { continue; }
+            result[handle] = @YES;
+        }
+        return result;
+    }
+
+    if ([statesObj isKindOfClass:[NSSet class]]) {
+        for (id entry in (NSSet *)statesObj) {
+            NSString *handle = handleIdentifierFromObject(entry);
+            if (handle.length == 0) { continue; }
+            result[handle] = @YES;
+        }
+        return result;
+    }
+
+    return @{};
+}
+
+static NSDictionary<NSString *, NSNumber *> *participantTypingStatesForChat(id chat) {
+    if (!chat) { return @{}; }
+
+    NSArray<NSString *> *candidateSelectors = @[
+        @"participantTypingStates",
+        @"participantStates",
+        @"typingParticipants",
+        @"participantsTyping",
+        @"remoteParticipantTypingStates",
+        @"typingStateForParticipants",
+        @"_participantTypingStates"
+    ];
+
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (NSString *selectorName in candidateSelectors) {
+        SEL sel = NSSelectorFromString(selectorName);
+        if (![chat respondsToSelector:sel]) { continue; }
+        id statesObj = [chat performSelector:sel];
+        NSDictionary<NSString *, NSNumber *> *snapshot = typingSnapshotFromStateContainer(statesObj);
+        if (snapshot.count == 0) { continue; }
+        [result addEntriesFromDictionary:snapshot];
+    }
+    return result;
+}
+
+static NSString *firstStringValueForKeys(NSDictionary *dict, NSArray<NSString *> *keys) {
+    if (![dict isKindOfClass:[NSDictionary class]]) { return @""; }
+    for (NSString *key in keys) {
+        NSString *value = safeString(dict[key]);
+        if (value.length > 0) {
+            return value;
+        }
+    }
+    return @"";
+}
+
+static NSString *handleFromNotificationUserInfo(NSDictionary *userInfo) {
+    if (![userInfo isKindOfClass:[NSDictionary class]]) { return @""; }
+
+    NSArray<NSString *> *directKeys = @[
+        @"handle", @"participant", @"sender", @"from", @"from_id", @"remoteHandle", @"id"
+    ];
+    NSString *direct = firstStringValueForKeys(userInfo, directKeys);
+    if (direct.length > 0) {
+        return direct;
+    }
+
+    NSArray<NSString *> *objectKeys = @[
+        @"imhandle", @"imHandle", @"IMHandle", @"participantHandle", @"senderHandle", @"fromHandle"
+    ];
+    for (NSString *key in objectKeys) {
+        NSString *value = handleIdentifierFromObject(userInfo[key]);
+        if (value.length > 0) {
+            return value;
+        }
+    }
+    return @"";
+}
+
+static BOOL extractTypingStateFromNotificationUserInfo(NSDictionary *userInfo, BOOL *found) {
+    if (found) { *found = NO; }
+    if (![userInfo isKindOfClass:[NSDictionary class]]) { return NO; }
+
+    NSArray<NSString *> *stateKeys = @[
+        @"isTyping", @"is_typing", @"typing", @"typingState", @"typing_state", @"state"
+    ];
+    for (NSString *key in stateKeys) {
+        if (userInfo[key] != nil && userInfo[key] != [NSNull null]) {
+            if (found) { *found = YES; }
+            return typingStateFromValue(userInfo[key]);
+        }
+    }
+    return NO;
+}
+
+static BOOL typingSubscriptionMatches(NSDictionary *config, NSString *chatGUID, NSString *chatIdentifier) {
+    NSString *filterGUID = safeString(config[@"chat_guid"]);
+    NSString *filterID = safeString(config[@"chat_id"]);
+    NSString *filterRaw = safeString(config[@"chat_filter"]);
+
+    if (filterGUID.length == 0 && filterID.length == 0 && filterRaw.length == 0) {
+        return YES;
+    }
+    if (filterGUID.length > 0 && [filterGUID isEqualToString:chatGUID]) {
+        return YES;
+    }
+    if (filterID.length > 0 && [filterID isEqualToString:chatIdentifier]) {
+        return YES;
+    }
+    if (filterRaw.length > 0) {
+        if ([filterRaw isEqualToString:chatGUID] || [filterRaw isEqualToString:chatIdentifier]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void enqueueTypingEventForSubscriptions(NSString *chatGUID, NSString *chatIdentifier, NSString *handle, BOOL isTyping) {
+    ensureTypingCollections();
+    if (typingSubscriptions.count == 0) { return; }
+
+    NSString *timestamp = [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]];
+    NSDictionary *event = @{
+        @"chat_guid": chatGUID ?: @"",
+        @"chat_id": chatIdentifier ?: @"",
+        @"handle": handle ?: @"",
+        @"is_typing": @(isTyping),
+        @"timestamp": timestamp
+    };
+
+    for (NSNumber *subscriptionID in typingSubscriptions) {
+        NSDictionary *config = typingSubscriptions[subscriptionID];
+        if (!typingSubscriptionMatches(config, chatGUID, chatIdentifier)) {
+            continue;
+        }
+        NSMutableArray<NSDictionary *> *queue = typingEventQueues[subscriptionID];
+        if (!queue) {
+            queue = [NSMutableArray array];
+            typingEventQueues[subscriptionID] = queue;
+        }
+        [queue addObject:event];
+    }
+}
+
+static void processTypingSnapshotForChat(id chat, NSDictionary<NSString *, NSNumber *> *snapshot, NSString *source) {
+    ensureTypingCollections();
+
+    NSString *chatGUID = chatGUIDFromChat(chat);
+    NSString *chatIdentifier = chatIdentifierFromChat(chat);
+    NSString *chatKey = chatGUID.length > 0 ? chatGUID : [@"id:" stringByAppendingString:chatIdentifier];
+    if (chatKey.length == 0) { return; }
+
+    NSMutableDictionary<NSString *, NSNumber *> *previous = typingStatesByChat[chatKey] ?: [NSMutableDictionary dictionary];
+
+    NSMutableSet<NSString *> *handles = [NSMutableSet set];
+    [handles addObjectsFromArray:previous.allKeys];
+    [handles addObjectsFromArray:snapshot.allKeys];
+
+    for (NSString *handle in handles) {
+        BOOL oldState = [previous[handle] boolValue];
+        BOOL newState = [snapshot[handle] boolValue];
+        if (oldState != newState) {
+            enqueueTypingEventForSubscriptions(chatGUID, chatIdentifier, handle, newState);
+            NSLog(@"[imsg-plus] typing.changed %@ %@ in %@ (%@)",
+                  newState ? @"START" : @"STOP", handle, chatGUID.length > 0 ? chatGUID : chatIdentifier, source);
+        }
+    }
+
+    typingStatesByChat[chatKey] = [snapshot mutableCopy];
+}
+
+static void processDirectTypingUpdate(NSString *chatGUID, NSString *chatIdentifier, NSString *handle, BOOL isTyping, NSString *source) {
+    ensureTypingCollections();
+    if (handle.length == 0) { return; }
+
+    NSString *chatKey = chatGUID.length > 0 ? chatGUID : @"";
+    if (chatKey.length == 0 && chatIdentifier.length > 0) {
+        chatKey = [@"id:" stringByAppendingString:chatIdentifier];
+    }
+    if (chatKey.length == 0) {
+        chatKey = [@"handle:" stringByAppendingString:handle];
+    }
+
+    NSMutableDictionary<NSString *, NSNumber *> *previous = typingStatesByChat[chatKey] ?: [NSMutableDictionary dictionary];
+    BOOL oldState = [previous[handle] boolValue];
+    if (oldState != isTyping) {
+        enqueueTypingEventForSubscriptions(chatGUID, chatIdentifier, handle, isTyping);
+        NSLog(@"[imsg-plus] typing.changed %@ %@ in %@ (%@/direct)",
+              isTyping ? @"START" : @"STOP", handle,
+              chatGUID.length > 0 ? chatGUID : (chatIdentifier.length > 0 ? chatIdentifier : @"unknown"),
+              source ?: @"note");
+    }
+    previous[handle] = @(isTyping);
+    typingStatesByChat[chatKey] = previous;
+}
+
+static void captureTypingFromNotificationUserInfo(NSNotification *note, id chat) {
+    NSDictionary *userInfo = note.userInfo;
+    if (![userInfo isKindOfClass:[NSDictionary class]] || userInfo.count == 0) {
+        return;
+    }
+
+    BOOL foundState = NO;
+    BOOL isTyping = extractTypingStateFromNotificationUserInfo(userInfo, &foundState);
+    if (!foundState) {
+        return;
+    }
+
+    NSString *handle = handleFromNotificationUserInfo(userInfo);
+    if (handle.length == 0 && chat && [chat respondsToSelector:@selector(participants)]) {
+        NSArray *participants = [chat performSelector:@selector(participants)];
+        if (participants.count == 1) {
+            handle = handleIdentifierFromObject(participants.firstObject);
+        }
+    }
+    if (handle.length == 0) {
+        return;
+    }
+
+    NSString *chatGUID = firstStringValueForKeys(
+        userInfo, @[@"chat_guid", @"chatGUID", @"guid", @"chatGuid", @"chatGUIDString"]);
+    NSString *chatIdentifier = firstStringValueForKeys(
+        userInfo, @[@"chat_id", @"chatIdentifier", @"identifier", @"chat_identifier"]);
+
+    if (chatGUID.length == 0) {
+        chatGUID = chatGUIDFromChat(chat);
+    }
+    if (chatIdentifier.length == 0) {
+        chatIdentifier = chatIdentifierFromChat(chat);
+    }
+
+    processDirectTypingUpdate(chatGUID, chatIdentifier, handle, isTyping, note.name);
+}
+
+static void captureTypingStatesForChat(id chat, NSString *source) {
+    if (!chat) { return; }
+    NSDictionary<NSString *, NSNumber *> *snapshot = participantTypingStatesForChat(chat);
+    processTypingSnapshotForChat(chat, snapshot, source);
+}
+
+static void addUniqueChat(NSMutableArray *chats, NSMutableSet<NSString *> *seen, id chat) {
+    if (!chat) { return; }
+    NSString *chatGUID = chatGUIDFromChat(chat);
+    NSString *chatIdentifier = chatIdentifierFromChat(chat);
+    NSString *key = chatGUID.length > 0 ? chatGUID : [@"id:" stringByAppendingString:chatIdentifier];
+    if (key.length == 0) {
+        key = [NSString stringWithFormat:@"ptr:%p", chat];
+    }
+    if ([seen containsObject:key]) { return; }
+    [seen addObject:key];
+    [chats addObject:chat];
+}
+
+static NSArray *observedChatsForTypingSubscriptions(void) {
+    ensureTypingCollections();
+    NSMutableArray *chats = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    BOOL wantsAllChats = NO;
+    NSMutableArray<NSString *> *specificFilters = [NSMutableArray array];
+
+    for (NSNumber *subscriptionID in typingSubscriptions) {
+        NSDictionary *config = typingSubscriptions[subscriptionID];
+        NSString *chatGUID = safeString(config[@"chat_guid"]);
+        NSString *chatID = safeString(config[@"chat_id"]);
+        NSString *chatFilter = safeString(config[@"chat_filter"]);
+        NSString *filter = chatGUID.length > 0 ? chatGUID : (chatID.length > 0 ? chatID : chatFilter);
+        if (filter.length == 0) {
+            wantsAllChats = YES;
+            break;
+        }
+        [specificFilters addObject:filter];
+    }
+
+    Class registryClass = NSClassFromString(@"IMChatRegistry");
+    id registry = registryClass ? [registryClass performSelector:@selector(sharedInstance)] : nil;
+    if (!registry) { return chats; }
+
+    if (wantsAllChats && [registry respondsToSelector:@selector(allExistingChats)]) {
+        NSArray *allChats = [registry performSelector:@selector(allExistingChats)];
+        for (id chat in allChats) {
+            addUniqueChat(chats, seen, chat);
+        }
+        return chats;
+    }
+
+    for (NSString *filter in specificFilters) {
+        id chat = findChat(filter);
+        addUniqueChat(chats, seen, chat);
+    }
+
+    return chats;
+}
+
+static void ensureTypingObservation(void) {
+    ensureTypingCollections();
+
+    if (!typingNotificationObserver) {
+        typingNotificationObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:nil
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification *note) {
+            if (typingSubscriptions.count == 0) { return; }
+
+            id chat = chatFromNotification(note);
+            if (chat) {
+                captureTypingStatesForChat(chat, @"notification");
+            }
+            captureTypingFromNotificationUserInfo(note, chat);
+        }];
+        NSLog(@"[imsg-plus] Typing notification observer started");
+    }
+
+    if (!typingFallbackTimer) {
+        NSTimer *timer = [NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(NSTimer * _Nonnull t) {
+            @autoreleasepool {
+                if (typingSubscriptions.count == 0) { return; }
+                NSArray *chats = observedChatsForTypingSubscriptions();
+                for (id chat in chats) {
+                    captureTypingStatesForChat(chat, @"poll");
+                }
+            }
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+        typingFallbackTimer = timer;
+        NSLog(@"[imsg-plus] Typing fallback poller started");
+    }
+}
+
+static void stopTypingObservationIfIdle(void) {
+    if (typingSubscriptions.count > 0) { return; }
+
+    if (typingFallbackTimer) {
+        [typingFallbackTimer invalidate];
+        typingFallbackTimer = nil;
+    }
+    if (typingNotificationObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:typingNotificationObserver];
+        typingNotificationObserver = nil;
+    }
+    [typingStatesByChat removeAllObjects];
+}
+
 #pragma mark - Command Handlers
 
 static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
@@ -294,6 +814,95 @@ static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
     }
 }
 
+static NSDictionary* handleTypingSubscribe(NSInteger requestId, NSDictionary *params) {
+    ensureTypingCollections();
+    ensureTypingObservation();
+
+    NSString *filter = params[@"handle"] ?: params[@"chat_guid"] ?: params[@"chat_id"];
+    NSMutableDictionary *subscriptionConfig = [NSMutableDictionary dictionary];
+
+    if (filter.length > 0) {
+        id chat = findChat(filter);
+        if (chat) {
+            NSString *chatGUID = chatGUIDFromChat(chat);
+            NSString *chatID = chatIdentifierFromChat(chat);
+            if (chatGUID.length > 0) {
+                subscriptionConfig[@"chat_guid"] = chatGUID;
+            }
+            if (chatID.length > 0) {
+                subscriptionConfig[@"chat_id"] = chatID;
+            }
+            captureTypingStatesForChat(chat, @"subscribe");
+        } else {
+            subscriptionConfig[@"chat_filter"] = filter;
+            NSLog(@"[imsg-plus] typing_subscribe created unresolved filter: %@", filter);
+        }
+    }
+
+    NSNumber *subscriptionID = @(nextTypingSubscriptionID++);
+    typingSubscriptions[subscriptionID] = subscriptionConfig;
+    typingEventQueues[subscriptionID] = [NSMutableArray array];
+
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"subscription": subscriptionID
+    }];
+    if (subscriptionConfig[@"chat_guid"]) {
+        result[@"chat_guid"] = subscriptionConfig[@"chat_guid"];
+    }
+    if (subscriptionConfig[@"chat_id"]) {
+        result[@"chat_id"] = subscriptionConfig[@"chat_id"];
+    }
+    if (subscriptionConfig[@"chat_filter"]) {
+        result[@"chat_filter"] = subscriptionConfig[@"chat_filter"];
+    }
+    return successResponse(requestId, result);
+}
+
+static NSDictionary* handleTypingUnsubscribe(NSInteger requestId, NSDictionary *params) {
+    ensureTypingCollections();
+
+    NSNumber *subscriptionID = params[@"subscription"];
+    if (!subscriptionID) {
+        return errorResponse(requestId, @"Missing required parameter: subscription");
+    }
+
+    if (!typingSubscriptions[subscriptionID]) {
+        return errorResponse(requestId, [NSString stringWithFormat:@"Unknown typing subscription: %@", subscriptionID]);
+    }
+
+    [typingSubscriptions removeObjectForKey:subscriptionID];
+    [typingEventQueues removeObjectForKey:subscriptionID];
+    stopTypingObservationIfIdle();
+
+    return successResponse(requestId, @{
+        @"ok": @YES,
+        @"subscription": subscriptionID
+    });
+}
+
+static NSDictionary* handleTypingPoll(NSInteger requestId, NSDictionary *params) {
+    ensureTypingCollections();
+
+    NSNumber *subscriptionID = params[@"subscription"];
+    if (!subscriptionID) {
+        return errorResponse(requestId, @"Missing required parameter: subscription");
+    }
+
+    NSMutableArray<NSDictionary *> *queue = typingEventQueues[subscriptionID];
+    if (!queue) {
+        return errorResponse(requestId, [NSString stringWithFormat:@"Unknown typing subscription: %@", subscriptionID]);
+    }
+
+    NSArray<NSDictionary *> *events = [queue copy];
+    [queue removeAllObjects];
+
+    return successResponse(requestId, @{
+        @"subscription": subscriptionID,
+        @"events": events,
+        @"count": @(events.count)
+    });
+}
+
 static NSDictionary* handleRead(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
 
@@ -334,7 +943,7 @@ static void writeResponseToFile(NSDictionary *response) {
 }
 
 // Map reaction type to verb string for summary text
-static NSString* reactionVerb(long long reactionType) {
+static NSString* reactionVerb(long long reactionType, NSString *customEmoji) {
     // For removals (3000+), use the same verb as the base type
     long long baseType = reactionType >= 3000 ? reactionType - 1000 : reactionType;
     switch (baseType) {
@@ -344,6 +953,14 @@ static NSString* reactionVerb(long long reactionType) {
         case 2003: return @"Laughed at ";
         case 2004: return @"Emphasized ";
         case 2005: return @"Questioned ";
+        case 2006:
+            if (reactionType >= 3000) {
+                return @"Removed a reaction from ";
+            }
+            if (customEmoji && customEmoji.length > 0) {
+                return [NSString stringWithFormat:@"Reacted %@ to ", customEmoji];
+            }
+            return @"Reacted to ";
         default:   return @"Reacted to ";
     }
 }
@@ -353,6 +970,7 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
     NSString *messageGUID = params[@"guid"];
     NSNumber *type = params[@"type"];
+    NSString *customEmoji = params[@"emoji"];
     NSNumber *partIndexNum = params[@"partIndex"];
     int partIndex = partIndexNum ? [partIndexNum intValue] : 0;
 
@@ -385,6 +1003,10 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
 
     // Capture values for the completion block
     long long reactionType = [type longLongValue];
+    BOOL customReaction = (reactionType == 2006 || reactionType == 3006);
+    if (customReaction && (!customEmoji || customEmoji.length == 0)) {
+        return errorResponse(requestId, @"Custom emoji reactions require an emoji parameter");
+    }
 
     // Build and invoke the async load call
     NSMethodSignature *loadSig = [historyController methodSignatureForSelector:loadSel];
@@ -475,7 +1097,7 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
                 NSDictionary *messageSummary = @{@"amc": @1, @"ams": summaryText};
 
                 // Build the reaction text: "Loved "message text""
-                NSString *verb = reactionVerb(reactionType);
+                NSString *verb = reactionVerb(reactionType, customEmoji);
                 NSString *reactionString = [verb stringByAppendingString:
                     [NSString stringWithFormat:@"\u201c%@\u201d", summaryText]];
                 NSMutableAttributedString *reactionText =
@@ -569,6 +1191,22 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
                     return;
                 }
 
+                if (customReaction && customEmoji.length > 0) {
+                    SEL emojiSel = NSSelectorFromString(@"_associatedMessageEmoji:");
+                    if ([reactionMessage respondsToSelector:emojiSel]) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(reactionMessage, emojiSel, customEmoji);
+                        NSLog(@"[imsg-plus] Set custom associatedMessageEmoji via _associatedMessageEmoji: %@", customEmoji);
+                    } else {
+                        SEL legacyEmojiSel = NSSelectorFromString(@"setAssociatedMessageEmoji:");
+                        if ([reactionMessage respondsToSelector:legacyEmojiSel]) {
+                            ((void (*)(id, SEL, id))objc_msgSend)(reactionMessage, legacyEmojiSel, customEmoji);
+                            NSLog(@"[imsg-plus] Set custom associatedMessageEmoji via setAssociatedMessageEmoji: %@", customEmoji);
+                        } else {
+                            NSLog(@"[imsg-plus] ⚠️ Custom emoji setter not available on IMMessage; proceeding without explicit emoji field");
+                        }
+                    }
+                }
+
                 NSLog(@"[imsg-plus] Created reaction message: %@ (class: %@)", reactionMessage, [reactionMessage class]);
 
                 // Send the reaction message
@@ -585,6 +1223,7 @@ static NSDictionary* handleReact(NSInteger requestId, NSDictionary *params) {
                     @"handle": handle,
                     @"guid": messageGUID,
                     @"type": type,
+                    @"emoji": customEmoji ?: @"",
                     @"partIndex": @(partIndex),
                     @"action": reactionType >= 3000 ? @"removed" : @"added",
                     @"method": @"createMessage_BlueBubbles"
@@ -702,6 +1341,12 @@ static NSDictionary* processCommand(NSDictionary *command) {
 
     if ([action isEqualToString:@"typing"]) {
         return handleTyping(requestId, params);
+    } else if ([action isEqualToString:@"typing_subscribe"]) {
+        return handleTypingSubscribe(requestId, params);
+    } else if ([action isEqualToString:@"typing_unsubscribe"]) {
+        return handleTypingUnsubscribe(requestId, params);
+    } else if ([action isEqualToString:@"typing_poll"]) {
+        return handleTypingPoll(requestId, params);
     } else if ([action isEqualToString:@"read"]) {
         return handleRead(requestId, params);
     } else if ([action isEqualToString:@"react"]) {
@@ -859,6 +1504,14 @@ static void injectedCleanup(void) {
     if (fileWatchSource) {
         dispatch_source_cancel(fileWatchSource);
         fileWatchSource = nil;
+    }
+    if (typingFallbackTimer) {
+        [typingFallbackTimer invalidate];
+        typingFallbackTimer = nil;
+    }
+    if (typingNotificationObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:typingNotificationObserver];
+        typingNotificationObserver = nil;
     }
 
     if (lockFd >= 0) {
