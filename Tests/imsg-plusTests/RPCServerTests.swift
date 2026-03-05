@@ -350,6 +350,76 @@ func rpcWatchSubscribeEmitsNotificationAndUnsubscribe() async throws {
 }
 
 @Test
+func rpcMessageEditRequiresHandle() async throws {
+  let store = try RPCTestDatabase.makeStore()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":20,"method":"message.edit","params":{"guid":"ABC","text":"new"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
+func rpcMessageEditRequiresGuid() async throws {
+  let store = try RPCTestDatabase.makeStore()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":21,"method":"message.edit","params":{"handle":"+123","text":"new"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
+func rpcMessageEditRequiresText() async throws {
+  let store = try RPCTestDatabase.makeStore()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":22,"method":"message.edit","params":{"handle":"+123","guid":"ABC"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
+func rpcMessageUnsendRequiresHandle() async throws {
+  let store = try RPCTestDatabase.makeStore()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":23,"method":"message.unsend","params":{"guid":"ABC"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
+func rpcMessageUnsendRequiresGuid() async throws {
+  let store = try RPCTestDatabase.makeStore()
+  let output = TestRPCOutput()
+  let server = RPCServer(store: store, verbose: false, output: output)
+
+  let line =
+    #"{"jsonrpc":"2.0","id":24,"method":"message.unsend","params":{"handle":"+123"}}"#
+  await server.handleLineForTesting(line)
+
+  let error = output.errors.first?["error"] as? [String: Any]
+  #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test
 func rpcWatchUnsubscribeRequiresSubscription() async throws {
   let store = try RPCTestDatabase.makeStore()
   let output = TestRPCOutput()

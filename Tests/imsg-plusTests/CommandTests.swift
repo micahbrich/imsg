@@ -196,6 +196,78 @@ func sendCommandResolvesChatID() async throws {
 }
 
 @Test
+func editCommandRejectsMissingHandle() async {
+  let values = ParsedValues(
+    positional: [],
+    options: ["guid": ["ABC"], "text": ["new"]],
+    flags: []
+  )
+  let runtime = RuntimeOptions(parsedValues: values)
+  do {
+    try await EditCommand.run(values: values, runtime: runtime)
+    #expect(Bool(false))
+  } catch let error as IMsgError {
+    #expect(error.localizedDescription.contains("--handle"))
+  } catch {
+    #expect(Bool(false))
+  }
+}
+
+@Test
+func editCommandRejectsMissingGuid() async {
+  let values = ParsedValues(
+    positional: [],
+    options: ["handle": ["+123"], "text": ["new"]],
+    flags: []
+  )
+  let runtime = RuntimeOptions(parsedValues: values)
+  do {
+    try await EditCommand.run(values: values, runtime: runtime)
+    #expect(Bool(false))
+  } catch let error as IMsgError {
+    #expect(error.localizedDescription.contains("--guid"))
+  } catch {
+    #expect(Bool(false))
+  }
+}
+
+@Test
+func editCommandRejectsMutuallyExclusiveUnsendAndText() async {
+  let values = ParsedValues(
+    positional: [],
+    options: ["handle": ["+123"], "guid": ["ABC"], "text": ["new"]],
+    flags: ["unsend"]
+  )
+  let runtime = RuntimeOptions(parsedValues: values)
+  do {
+    try await EditCommand.run(values: values, runtime: runtime)
+    #expect(Bool(false))
+  } catch let error as IMsgError {
+    #expect(error.localizedDescription.contains("mutually exclusive"))
+  } catch {
+    #expect(Bool(false))
+  }
+}
+
+@Test
+func editCommandRequiresTextOrUnsend() async {
+  let values = ParsedValues(
+    positional: [],
+    options: ["handle": ["+123"], "guid": ["ABC"]],
+    flags: []
+  )
+  let runtime = RuntimeOptions(parsedValues: values)
+  do {
+    try await EditCommand.run(values: values, runtime: runtime)
+    #expect(Bool(false))
+  } catch let error as IMsgError {
+    #expect(error.localizedDescription.contains("--text or --unsend"))
+  } catch {
+    #expect(Bool(false))
+  }
+}
+
+@Test
 func watchCommandRejectsInvalidDebounce() async {
   let values = ParsedValues(
     positional: [],

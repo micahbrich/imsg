@@ -18,6 +18,7 @@ struct CommandRouter {
       TypingCommand.spec,
       ReadCommand.spec,
       ReactCommand.spec,
+      EditCommand.spec,
       GroupCommand.spec,
       StatusCommand.spec,
       LaunchCommand.spec,

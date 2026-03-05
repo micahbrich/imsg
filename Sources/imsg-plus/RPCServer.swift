@@ -251,6 +251,13 @@ final class RPCServer {
         try await handleGroupCreate(params: params, id: id)
       case "group.rename":
         try await handleGroupRename(params: params, id: id)
+      case "message.edit":
+        try await handleMessageEdit(params: params, id: id)
+      case "message.unsend":
+        try await handleMessageUnsend(params: params, id: id)
+      case "bridge.status":
+        let status = try await IMCoreBridge.shared.getStatus()
+        respond(id: id, result: status)
       default:
         output.sendError(id: id, error: RPCError.methodNotFound(method))
       }
@@ -342,6 +349,9 @@ final class RPCServer {
       }
     }
 
+    // Parse optional reply_to_guid
+    let replyToGUID = stringParam(params["reply_to_guid"])
+
     // Parse optional effect
     let effectStr = stringParam(params["effect"])
     var effect: MessageEffect? = nil
@@ -352,6 +362,11 @@ final class RPCServer {
         )
       }
       effect = parsed
+    }
+
+    // Thread reply requires bridge
+    if replyToGUID != nil && !bridgeAvailable {
+      throw RPCError.internalError("IMCoreBridge not available (required for thread replies)")
     }
 
     // Check for markdown_text param — try rich text send via bridge
@@ -365,21 +380,22 @@ final class RPCServer {
         )
         if let handle {
           try await IMCoreBridge.shared.sendRichMessage(
-            handle: handle, attributedText: attrData, effect: effect)
+            handle: handle, attributedText: attrData, effect: effect, replyToGUID: replyToGUID)
           sentViaRichText = true
         }
       }
     }
 
-    // Plain text with effect — send via bridge
-    if !sentViaRichText && effect != nil && bridgeAvailable {
+    // Plain text with effect or reply — send via bridge
+    if !sentViaRichText && (effect != nil || replyToGUID != nil) && bridgeAvailable {
       let handle = resolveTypingHandle(
         recipient: recipient,
         chatIdentifier: resolvedChatIdentifier,
         chatGUID: resolvedChatGUID
       )
       if let handle {
-        try await IMCoreBridge.shared.sendMessage(handle: handle, text: text, effect: effect)
+        try await IMCoreBridge.shared.sendMessage(
+          handle: handle, text: text, effect: effect, replyToGUID: replyToGUID)
         sentViaRichText = true
       }
     }
@@ -523,6 +539,48 @@ final class RPCServer {
     }
     try await IMCoreBridge.shared.renameChat(handle: handle, name: name)
     respond(id: id, result: ["ok": true, "handle": handle, "name": name])
+  }
+
+  private func handleMessageEdit(params: [String: Any], id: Any?) async throws {
+    guard let handle = stringParam(params["handle"]), !handle.isEmpty else {
+      throw RPCError.invalidParams("handle is required")
+    }
+    guard let guid = stringParam(params["guid"]), !guid.isEmpty else {
+      throw RPCError.invalidParams("guid is required")
+    }
+    let text = stringParam(params["text"]) ?? ""
+    let markdownText = stringParam(params["markdown_text"])
+    if text.isEmpty && (markdownText ?? "").isEmpty {
+      throw RPCError.invalidParams("text or markdown_text is required")
+    }
+    guard bridgeAvailable else {
+      throw RPCError.internalError("IMCoreBridge not available")
+    }
+    var attrData: Data? = nil
+    if let markdownText, !markdownText.isEmpty {
+      attrData = MarkdownComposer.compose(markdownText)
+    }
+    let editText = text.isEmpty ? (markdownText ?? "") : text
+    try await IMCoreBridge.shared.editMessage(
+      handle: handle, messageGUID: guid, newText: editText, attributedText: attrData)
+    respond(id: id, result: ["ok": true, "handle": handle, "guid": guid, "action": "edited"])
+  }
+
+  private func handleMessageUnsend(params: [String: Any], id: Any?) async throws {
+    guard let handle = stringParam(params["handle"]), !handle.isEmpty else {
+      throw RPCError.invalidParams("handle is required")
+    }
+    guard let guid = stringParam(params["guid"]), !guid.isEmpty else {
+      throw RPCError.invalidParams("guid is required")
+    }
+    guard bridgeAvailable else {
+      throw RPCError.internalError("IMCoreBridge not available")
+    }
+    let partIndex = intParam(params["part_index"]) ?? 0
+    try await IMCoreBridge.shared.unsendMessage(
+      handle: handle, messageGUID: guid, partIndex: partIndex)
+    respond(
+      id: id, result: ["ok": true, "handle": handle, "guid": guid, "action": "unsent"])
   }
 
   /// Resolve the best handle for typing/read from send params

@@ -28,6 +28,9 @@ enum SendCommand {
             help:
               "Send effect: gentle, loud, slam, invisibleink, confetti, balloons, fireworks, heart, lasers, echo, spotlight, sparkles, shootingstar"
           ),
+          .make(
+            label: "replyTo", names: [.long("reply-to")],
+            help: "Message GUID to reply to (thread reply)"),
         ],
         flags: [
           .make(
@@ -91,6 +94,7 @@ enum SendCommand {
     }
 
     let useMarkdown = values.flag("markdown")
+    let replyToGUID = values.option("replyTo") ?? ""
     let effectStr = values.option("effect") ?? ""
     var effect: MessageEffect? = nil
     if !effectStr.isEmpty {
@@ -102,8 +106,10 @@ enum SendCommand {
       effect = parsed
     }
 
-    // Effects require the IMCore bridge
-    if effect != nil || (useMarkdown && !text.isEmpty) {
+    let replyGUID: String? = replyToGUID.isEmpty ? nil : replyToGUID
+
+    // Effects/reply-to/markdown require the IMCore bridge
+    if effect != nil || replyGUID != nil || (useMarkdown && !text.isEmpty) {
       let bridge = IMCoreBridge.shared
       let handle =
         resolvedChatGUID.isEmpty
@@ -113,9 +119,10 @@ enum SendCommand {
       if bridge.isAvailable && !handle.isEmpty {
         if useMarkdown, let attrData = MarkdownComposer.compose(text) {
           try await bridge.sendRichMessage(
-            handle: handle, attributedText: attrData, effect: effect)
+            handle: handle, attributedText: attrData, effect: effect, replyToGUID: replyGUID)
         } else {
-          try await bridge.sendMessage(handle: handle, text: text, effect: effect)
+          try await bridge.sendMessage(
+            handle: handle, text: text, effect: effect, replyToGUID: replyGUID)
         }
         if runtime.jsonOutput {
           var result: [String: String] = ["status": "sent"]

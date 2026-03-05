@@ -58,6 +58,15 @@ func messagePayload(
   if let replyToGUID = message.replyToGUID, !replyToGUID.isEmpty {
     payload["reply_to_guid"] = replyToGUID
   }
+  if let part = message.threadOriginatorPart, !part.isEmpty {
+    payload["reply_to_part"] = part
+  }
+  if message.isEdited {
+    payload["is_edited"] = true
+  }
+  if let dateEdited = message.dateEdited {
+    payload["date_edited"] = CLIISO8601.format(dateEdited)
+  }
   if let senderName, !senderName.isEmpty {
     payload["sender_name"] = senderName
   }

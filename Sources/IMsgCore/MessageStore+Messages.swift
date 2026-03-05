@@ -13,6 +13,9 @@ extension MessageStore {
     let associatedTypeColumn = hasReactionColumns ? "m.associated_message_type" : "NULL"
     let destinationCallerColumn = hasDestinationCallerID ? "m.destination_caller_id" : "NULL"
     let audioMessageColumn = hasAudioMessageColumn ? "m.is_audio_message" : "0"
+    let threadOriginatorColumn = hasThreadOriginator ? "m.thread_originator_guid" : "NULL"
+    let threadOriginatorPartColumn = hasThreadOriginator ? "m.thread_originator_part" : "NULL"
+    let dateEditedColumn = hasDateEdited ? "m.date_edited" : "NULL"
     let reactionFilter =
       hasReactionColumns
       ? " AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type > 3006)"
@@ -22,7 +25,10 @@ extension MessageStore {
              \(audioMessageColumn) AS is_audio_message, \(destinationCallerColumn) AS destination_caller_id,
              \(guidColumn) AS guid, \(associatedGuidColumn) AS associated_guid, \(associatedTypeColumn) AS associated_type,
              (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id = m.ROWID) AS attachments,
-             \(bodyColumn) AS body
+             \(bodyColumn) AS body,
+             \(threadOriginatorColumn) AS thread_originator_guid,
+             \(threadOriginatorPartColumn) AS thread_originator_part,
+             \(dateEditedColumn) AS date_edited
       FROM message m
       JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
       LEFT JOIN handle h ON m.handle_id = h.ROWID
@@ -74,6 +80,9 @@ extension MessageStore {
         let associatedType = intValue(row[11])
         let attachments = intValue(row[12]) ?? 0
         let body = dataValue(row[13])
+        let threadOriginatorGUID = stringValue(row[14])
+        let threadOriginatorPart = stringValue(row[15])
+        let dateEditedRaw = int64Value(row[16])
         var resolvedText = text
         var markdownText: String?
         if text.isEmpty {
@@ -85,10 +94,12 @@ extension MessageStore {
           resolvedText = transcription
           markdownText = nil
         }
-        let replyToGUID = replyToGUID(
-          associatedGuid: associatedGuid,
-          associatedType: associatedType
-        )
+        let resolvedReplyToGUID: String? =
+          !threadOriginatorGUID.isEmpty
+          ? threadOriginatorGUID
+          : replyToGUID(associatedGuid: associatedGuid, associatedType: associatedType)
+        let isEdited = (dateEditedRaw ?? 0) > 0
+        let dateEdited: Date? = isEdited ? appleDate(from: dateEditedRaw) : nil
         messages.append(
           Message(
             rowID: rowID,
@@ -101,8 +112,12 @@ extension MessageStore {
             handleID: handleID,
             attachmentsCount: attachments,
             guid: guid,
-            replyToGUID: replyToGUID,
-            markdownText: markdownText
+            replyToGUID: resolvedReplyToGUID,
+            markdownText: markdownText,
+            isEdited: isEdited,
+            dateEdited: dateEdited,
+            threadOriginatorGUID: threadOriginatorGUID.isEmpty ? nil : threadOriginatorGUID,
+            threadOriginatorPart: threadOriginatorPart.isEmpty ? nil : threadOriginatorPart
           ))
       }
       return messages
@@ -116,6 +131,9 @@ extension MessageStore {
     let associatedTypeColumn = hasReactionColumns ? "m.associated_message_type" : "NULL"
     let destinationCallerColumn = hasDestinationCallerID ? "m.destination_caller_id" : "NULL"
     let audioMessageColumn = hasAudioMessageColumn ? "m.is_audio_message" : "0"
+    let threadOriginatorColumn = hasThreadOriginator ? "m.thread_originator_guid" : "NULL"
+    let threadOriginatorPartColumn = hasThreadOriginator ? "m.thread_originator_part" : "NULL"
+    let dateEditedColumn = hasDateEdited ? "m.date_edited" : "NULL"
     let reactionFilter =
       hasReactionColumns
       ? " AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type > 3006)"
@@ -125,7 +143,10 @@ extension MessageStore {
              \(audioMessageColumn) AS is_audio_message, \(destinationCallerColumn) AS destination_caller_id,
              \(guidColumn) AS guid, \(associatedGuidColumn) AS associated_guid, \(associatedTypeColumn) AS associated_type,
              (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id = m.ROWID) AS attachments,
-             \(bodyColumn) AS body
+             \(bodyColumn) AS body,
+             \(threadOriginatorColumn) AS thread_originator_guid,
+             \(threadOriginatorPartColumn) AS thread_originator_part,
+             \(dateEditedColumn) AS date_edited
       FROM message m
       LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
       LEFT JOIN handle h ON m.handle_id = h.ROWID
@@ -160,6 +181,9 @@ extension MessageStore {
         let associatedType = intValue(row[12])
         let attachments = intValue(row[13]) ?? 0
         let body = dataValue(row[14])
+        let threadOriginatorGUID = stringValue(row[15])
+        let threadOriginatorPart = stringValue(row[16])
+        let dateEditedRaw = int64Value(row[17])
         var resolvedText = text
         var markdownText: String?
         if text.isEmpty {
@@ -171,10 +195,12 @@ extension MessageStore {
           resolvedText = transcription
           markdownText = nil
         }
-        let replyToGUID = replyToGUID(
-          associatedGuid: associatedGuid,
-          associatedType: associatedType
-        )
+        let resolvedReplyToGUID: String? =
+          !threadOriginatorGUID.isEmpty
+          ? threadOriginatorGUID
+          : replyToGUID(associatedGuid: associatedGuid, associatedType: associatedType)
+        let isEdited = (dateEditedRaw ?? 0) > 0
+        let dateEdited: Date? = isEdited ? appleDate(from: dateEditedRaw) : nil
         messages.append(
           Message(
             rowID: rowID,
@@ -187,8 +213,12 @@ extension MessageStore {
             handleID: handleID,
             attachmentsCount: attachments,
             guid: guid,
-            replyToGUID: replyToGUID,
-            markdownText: markdownText
+            replyToGUID: resolvedReplyToGUID,
+            markdownText: markdownText,
+            isEdited: isEdited,
+            dateEdited: dateEdited,
+            threadOriginatorGUID: threadOriginatorGUID.isEmpty ? nil : threadOriginatorGUID,
+            threadOriginatorPart: threadOriginatorPart.isEmpty ? nil : threadOriginatorPart
           ))
       }
       return messages

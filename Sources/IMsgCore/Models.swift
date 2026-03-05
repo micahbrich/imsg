@@ -229,6 +229,10 @@ public struct Message: Sendable, Equatable {
   public let service: String
   public let handleID: Int64?
   public let attachmentsCount: Int
+  public let isEdited: Bool
+  public let dateEdited: Date?
+  public let threadOriginatorGUID: String?
+  public let threadOriginatorPart: String?
 
   public init(
     rowID: Int64,
@@ -242,7 +246,11 @@ public struct Message: Sendable, Equatable {
     attachmentsCount: Int,
     guid: String = "",
     replyToGUID: String? = nil,
-    markdownText: String? = nil
+    markdownText: String? = nil,
+    isEdited: Bool = false,
+    dateEdited: Date? = nil,
+    threadOriginatorGUID: String? = nil,
+    threadOriginatorPart: String? = nil
   ) {
     self.rowID = rowID
     self.chatID = chatID
@@ -256,6 +264,10 @@ public struct Message: Sendable, Equatable {
     self.service = service
     self.handleID = handleID
     self.attachmentsCount = attachmentsCount
+    self.isEdited = isEdited
+    self.dateEdited = dateEdited
+    self.threadOriginatorGUID = threadOriginatorGUID
+    self.threadOriginatorPart = threadOriginatorPart
   }
 }
 

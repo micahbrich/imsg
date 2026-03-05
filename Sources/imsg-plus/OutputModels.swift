@@ -33,12 +33,15 @@ struct MessagePayload: Codable {
   let chatID: Int64
   let guid: String
   let replyToGUID: String?
+  let replyToPart: String?
   let sender: String
   let senderName: String?
   let isFromMe: Bool
   let text: String
   let markdownText: String?
   let createdAt: String
+  let isEdited: Bool?
+  let dateEdited: String?
   let attachments: [AttachmentPayload]
   let reactions: [ReactionPayload]
 
@@ -53,12 +56,15 @@ struct MessagePayload: Codable {
     self.chatID = message.chatID
     self.guid = message.guid
     self.replyToGUID = message.replyToGUID
+    self.replyToPart = message.threadOriginatorPart
     self.sender = message.sender
     self.senderName = senderName
     self.isFromMe = message.isFromMe
     self.text = message.text
     self.markdownText = markdownText
     self.createdAt = CLIISO8601.format(message.date)
+    self.isEdited = message.isEdited ? true : nil
+    self.dateEdited = message.dateEdited.map { CLIISO8601.format($0) }
     self.attachments = attachments.map { AttachmentPayload(meta: $0) }
     self.reactions = reactions.map { ReactionPayload(reaction: $0) }
   }
@@ -68,12 +74,15 @@ struct MessagePayload: Codable {
     case chatID = "chat_id"
     case guid
     case replyToGUID = "reply_to_guid"
+    case replyToPart = "reply_to_part"
     case sender
     case senderName = "sender_name"
     case isFromMe = "is_from_me"
     case text
     case markdownText = "markdown_text"
     case createdAt = "created_at"
+    case isEdited = "is_edited"
+    case dateEdited = "date_edited"
     case attachments
     case reactions
   }

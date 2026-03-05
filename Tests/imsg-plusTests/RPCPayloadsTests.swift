@@ -115,6 +115,64 @@ func messagePayloadOmitsEmptyReplyToGuid() {
 }
 
 @Test
+func messagePayloadIncludesEditFields() {
+  let message = Message(
+    rowID: 7,
+    chatID: 10,
+    sender: "+123",
+    text: "edited text",
+    date: Date(timeIntervalSince1970: 1),
+    isFromMe: true,
+    service: "iMessage",
+    handleID: nil,
+    attachmentsCount: 0,
+    guid: "msg-guid-7",
+    replyToGUID: "msg-guid-1",
+    isEdited: true,
+    dateEdited: Date(timeIntervalSince1970: 100),
+    threadOriginatorGUID: "msg-guid-1",
+    threadOriginatorPart: "0:0:0"
+  )
+  let payload = messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+  #expect(payload["is_edited"] as? Bool == true)
+  #expect(payload["date_edited"] as? String != nil)
+  #expect(payload["reply_to_guid"] as? String == "msg-guid-1")
+  #expect(payload["reply_to_part"] as? String == "0:0:0")
+}
+
+@Test
+func messagePayloadOmitsEditFieldsWhenNotEdited() {
+  let message = Message(
+    rowID: 8,
+    chatID: 10,
+    sender: "+123",
+    text: "normal",
+    date: Date(timeIntervalSince1970: 1),
+    isFromMe: false,
+    service: "iMessage",
+    handleID: nil,
+    attachmentsCount: 0,
+    guid: "msg-guid-8"
+  )
+  let payload = messagePayload(
+    message: message,
+    chatInfo: nil,
+    participants: [],
+    attachments: [],
+    reactions: []
+  )
+  #expect(payload["is_edited"] == nil)
+  #expect(payload["date_edited"] == nil)
+  #expect(payload["reply_to_part"] == nil)
+}
+
+@Test
 func paramParsingHelpers() {
   #expect(stringParam(123 as NSNumber) == "123")
   #expect(intParam("42") == 42)

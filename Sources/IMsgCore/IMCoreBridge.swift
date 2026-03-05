@@ -431,9 +431,10 @@ public final class IMCoreBridge: @unchecked Sendable {
   }
 
   /// Send a rich text message (with attributed text and optional effect)
-  public func sendRichMessage(handle: String, attributedText: Data, effect: MessageEffect? = nil)
-    async throws
-  {
+  public func sendRichMessage(
+    handle: String, attributedText: Data, effect: MessageEffect? = nil,
+    replyToGUID: String? = nil
+  ) async throws {
     var params: [String: Any] = [
       "handle": handle,
       "attributed_text": attributedText.base64EncodedString(),
@@ -441,15 +442,53 @@ public final class IMCoreBridge: @unchecked Sendable {
     if let effect {
       params["effect_id"] = effect.expressiveSendStyleId
     }
+    if let replyToGUID {
+      params["reply_to_guid"] = replyToGUID
+    }
     _ = try await sendCommand(action: "send_message", params: params)
   }
 
   /// Send a plain text message with an effect via IMCore bridge
-  public func sendMessage(handle: String, text: String, effect: MessageEffect? = nil) async throws {
+  @discardableResult
+  public func sendMessage(
+    handle: String, text: String, effect: MessageEffect? = nil,
+    replyToGUID: String? = nil
+  ) async throws -> [String: Any] {
     var params: [String: Any] = ["handle": handle, "text": text]
     if let effect {
       params["effect_id"] = effect.expressiveSendStyleId
     }
-    _ = try await sendCommand(action: "send_message", params: params)
+    if let replyToGUID {
+      params["reply_to_guid"] = replyToGUID
+    }
+    return try await sendCommand(action: "send_message", params: params)
+  }
+
+  /// Edit a previously sent message
+  public func editMessage(
+    handle: String, messageGUID: String, newText: String,
+    attributedText: Data? = nil
+  ) async throws {
+    var params: [String: Any] = [
+      "handle": handle,
+      "guid": messageGUID,
+      "text": newText,
+    ]
+    if let attributedText {
+      params["attributed_text"] = attributedText.base64EncodedString()
+    }
+    _ = try await sendCommand(action: "edit_message", params: params)
+  }
+
+  /// Unsend (retract) a previously sent message
+  public func unsendMessage(
+    handle: String, messageGUID: String, partIndex: Int = 0
+  ) async throws {
+    let params: [String: Any] = [
+      "handle": handle,
+      "guid": messageGUID,
+      "part_index": partIndex,
+    ]
+    _ = try await sendCommand(action: "unsend_message", params: params)
   }
 }
