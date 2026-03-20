@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.1.0 - 2026-03-15
+
+- feat: FIFO send queue with idempotency keys and stale job reaper
+- feat: `enqueue`, `worker`, and `queue` CLI commands for reliable background delivery
+- feat: `queue.status` RPC method
+- fix: resolve FIFO queue race condition and message ordering
+- fix: reaper fails zombie jobs that exceeded max_attempts instead of endlessly reclaiming
+- feat: 1s typing indicator in queue worker before send
+
+## 2.0.0 - 2026-03-01
+
+**Ground-up rewrite from Swift to TypeScript.** This release replaces the entire codebase with a new implementation focused on stability, testability, and maintainability.
+
+### What changed
+
+- **Language**: Swift → TypeScript (Node.js 20+, `better-sqlite3`, `arg`)
+- **Build**: SwiftPM → npm + tsc + Makefile
+- **Tests**: XCTest → vitest with in-memory SQLite and `memfs`
+- **RPC**: same JSON-RPC 2.0 protocol, now with subscriptions auto-restart and heartbeat
+- **Queue**: new SQLite-backed FIFO queue with idempotency and retry logic
+- **Bridge**: same file-based IPC to Objective-C dylib, rewritten in TypeScript
+
+### Highlights
+
+- feat: TypeScript rewrite with strict mode and full test coverage
+- feat: tapback reactions via `react` command and `messages.react` RPC
+- feat: `skip_typing` parameter for send RPC
+- feat: auto-restart watch subscriptions on transient DB errors
+- feat: push participant/date filters into SQL for better performance
+- feat: attachment cleanup command (auto-remove staged dirs older than 1 hour)
+- feat: resilience tests for always-on channel critical paths
+- chore: simplify schema detection, remove dead code, pure functions
+
+---
+
+## Pre-v2 releases (Swift era)
+
 ## 0.4.1 - Unreleased
 
 - fix: prefer handle sends when chat identifier is a direct handle

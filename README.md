@@ -1,127 +1,169 @@
-# 💬 imsg-plus — Enhanced iMessage CLI with Typing, Reactions & More
+# imsg-plus
 
-An enhanced macOS Messages.app CLI that adds typing indicators, read receipts, tapback reactions, and a JSON-RPC server to the original [imsg](https://github.com/steipete/imsg). Basic features use AppleScript; advanced features use IMCore via an Objective-C helper dylib.
+Send and read iMessage/SMS from the terminal. Typing indicators, read receipts, tapback reactions, a FIFO send queue, and a JSON-RPC server — all from the command line.
 
-## Features
+Originally created by [Peter Steinberger](https://github.com/steipete/imsg). This is a ground-up rewrite (Go → Swift → **TypeScript**) focused on stability, testability, and long-term maintainability.
 
-### Original Features
-- List chats, view history, or stream new messages (`watch`).
-- Send text and attachments via iMessage or SMS (AppleScript, no private APIs).
-- Phone normalization to E.164 for reliable buddy lookup (`--region`, default US).
-- Optional attachment metadata output (mime, name, path, missing flag).
-- Filters: participants, start/end time, JSON output for tooling.
-- Read-only DB access (`mode=ro`), no DB writes.
-- Event-driven watch via filesystem events.
+## How it works
 
-### 🆕 New imsg-plus Features
-- **Typing indicators** — Show/hide typing bubble with `imsg-plus typing`
-- **Read receipts** — Mark messages as read with `imsg-plus read`
-- **Tapback reactions** — Send reactions (❤️ 👍 👎 😂 ‼️ ❓) with `imsg-plus react`
-- **Status check** — Verify feature availability with `imsg-plus status`
-- **Launch command** — Start Messages.app with dylib injection in one step
-- **JSON-RPC server** — Programmatic access via `imsg-plus rpc` over stdin/stdout
-- **Auto-typing** — Outgoing sends show typing indicator first (1.5–4s based on message length)
-- **Auto-read** — Incoming messages automatically get read receipts (~1s delay)
-- **Watchdog** — Auto-heal Messages.app sync issues by monitoring imagent logs
-- **Objective-C helper** — Bridges Swift to IMCore private framework
+imsg-plus reads messages directly from the macOS Messages database (`chat.db`) and sends via AppleScript. Advanced features like typing indicators and read receipts use an Objective-C dylib injected into Messages.app to access Apple's private IMCore framework.
+
+**No server, no daemon, no account credentials.** Everything runs locally on your Mac.
 
 ## Requirements
-- macOS 14+ with Messages.app signed in.
-- Full Disk Access for your terminal to read `~/Library/Messages/chat.db`.
-- **Automation permission** for imsg-plus to control Messages.app (see [Permissions troubleshooting](#%EF%B8%8F-automation-permission-important) — this is the #1 source of issues).
-- For SMS relay, enable "Text Message Forwarding" on your iPhone to this Mac.
+
+- macOS 14+ with Messages.app signed in
+- Node.js 20+
+- **Full Disk Access** for your terminal (to read `~/Library/Messages/chat.db`)
+- **Automation permission** for imsg-plus to control Messages.app (see [Permissions](#permissions))
+- For SMS relay: enable "Text Message Forwarding" on your iPhone → this Mac
+- For advanced features (typing, read receipts): SIP disabled (see [Advanced features setup](#advanced-features-setup))
 
 ## Install
 
 ```bash
+npm install
 make install
-# Builds the Swift CLI + Objective-C dylib
-# Copies binary to /usr/local/bin/imsg-plus
-# Copies dylib to /usr/local/lib/imsg-plus-helper.dylib
 ```
 
-To build just the dylib without installing:
+This compiles TypeScript, builds the Objective-C dylib, symlinks the binary to `/usr/local/bin/imsg-plus`, and copies the dylib to `/usr/local/lib/`.
+
+To uninstall:
+
 ```bash
-make build-dylib
+make uninstall
 ```
 
 ## Commands
 
-### Original Commands
-- `imsg-plus chats [--limit 20] [--json]` — list recent conversations.
-- `imsg-plus history --chat-id <id> [--limit 50] [--attachments] [--participants +15551234567,...] [--start 2025-01-01T00:00:00Z] [--end 2025-02-01T00:00:00Z] [--json]`
-- `imsg-plus watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms] [--attachments] [--participants …] [--start …] [--end …] [--json]`
-- `imsg-plus send --to <handle> [--text "hi"] [--file /path/img.jpg] [--service imessage|sms|auto] [--region US]`
+### chats — List conversations
 
-### New Commands (imsg-plus)
-- `imsg-plus typing --handle <phone/email> --state on|off` — Control typing indicator
-- `imsg-plus read --handle <phone/email> [--message-guid <guid>]` — Mark messages as read
-- `imsg-plus react --handle <phone/email> --guid <message-guid> --type <reaction> [--remove]` — Send tapback
-- `imsg-plus status` — Check if advanced features are available
-- `imsg-plus launch` — Launch Messages.app with dylib injection
-- `imsg-plus launch --kill-only` — Kill Messages.app without relaunching
-- `imsg-plus launch --dylib <path>` — Launch with a custom dylib path
-- `imsg-plus rpc` — Start JSON-RPC 2.0 server over stdin/stdout
-- `imsg-plus watchdog` — Install/manage the auto-healing watchdog daemon
-
-### Quick samples
 ```bash
-# list 5 chats
-imsg-plus chats --limit 5
+imsg-plus chats [--limit 20] [--json]
+```
 
-# list chats as JSON
-imsg-plus chats --limit 5 --json
+### history — View message history
 
-# last 10 messages in chat 1 with attachments
-imsg-plus history --chat-id 1 --limit 10 --attachments
+```bash
+imsg-plus history --chat-id <id> [--limit 50] [--json] [--attachments] \
+  [--participants +15551234567,...] [--start 2025-01-01T00:00:00Z] [--end 2025-02-01T00:00:00Z]
+```
 
-# filter by date and emit JSON
-imsg-plus history --chat-id 1 --start 2025-01-01T00:00:00Z --json
+### watch — Stream new messages in real time
 
-# live stream a chat
-imsg-plus watch --chat-id 1 --attachments --debounce 250ms
+```bash
+imsg-plus watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250] [--json] [--attachments] \
+  [--participants ...] [--start ...] [--end ...]
+```
 
-# send a picture
-imsg-plus send --to "+14155551212" --text "hi" --file ~/Desktop/pic.jpg --service imessage
+Uses filesystem events on `chat.db` with a polling fallback. Messages are yielded as they arrive.
 
-# show typing indicator
-imsg-plus typing --handle "+14155551212" --state on
+### send — Send a message
 
-# mark messages as read
-imsg-plus read --handle "+14155551212"
+```bash
+imsg-plus send --to <phone-or-email> [--text "hello"] [--file /path/to/image.jpg] \
+  [--service imessage|sms|auto] [--region US]
+```
 
-# send a tapback reaction
-imsg-plus react --handle "+14155551212" --guid "ABC-123" --type love
+Send to a group chat by targeting an existing conversation:
 
-# check feature availability
-imsg-plus status
+```bash
+imsg-plus send --chat-id <id> --text "hello group"
+imsg-plus send --chat-identifier "chat123456" --text "hello"
+imsg-plus send --chat-guid "iMessage;+;chat123456" --text "hello"
+```
 
-# launch Messages with dylib injection
-imsg-plus launch
+Phone numbers are normalized to E.164 automatically (`--region` defaults to US).
 
-# kill Messages without relaunching
+### react — Send a tapback reaction
+
+```bash
+imsg-plus react --to <phone-or-email> --guid <message-guid> --type love|like|dislike|laugh|emphasis|question \
+  [--service imessage|sms] [--region US]
+```
+
+### typing — Control typing indicator
+
+Requires [advanced features](#advanced-features-setup).
+
+```bash
+imsg-plus typing --handle <phone-or-email> --state on|off
+```
+
+### read — Mark messages as read
+
+Requires [advanced features](#advanced-features-setup).
+
+```bash
+imsg-plus read --handle <phone-or-email>
+```
+
+### status — Check feature availability
+
+```bash
+imsg-plus status [--json]
+```
+
+Reports whether basic features (send/receive) and advanced features (typing/read receipts) are available.
+
+### launch — Start Messages.app with dylib injection
+
+```bash
+imsg-plus launch [--dylib <path>] [--quiet]
 imsg-plus launch --kill-only
-
-# install and start the watchdog
-imsg-plus watchdog
-
-# check watchdog status
-imsg-plus watchdog --status
-
-# view watchdog logs
-imsg-plus watchdog --logs
-
-# stop and uninstall watchdog
-imsg-plus watchdog --uninstall
 ```
 
-## RPC Server
+Kills any running Messages instance, injects the dylib, and launches a fresh one.
 
-`imsg-plus rpc` starts a JSON-RPC 2.0 server over stdin/stdout, designed for programmatic integration (e.g., with [Clawdbot](#clawdbot-integration)).
+### enqueue — Queue a message for reliable delivery
 
 ```bash
-imsg-plus rpc [--no-auto-read] [--no-auto-typing]
+imsg-plus enqueue --to <phone> --text "hello" [--retries 3]
 ```
+
+Same arguments as `send`. Messages are persisted to a local SQLite queue (`~/.imsg-plus/queue.db`) and delivered by the worker. Supports idempotency keys for deduplication.
+
+### worker — Process the message queue
+
+```bash
+imsg-plus worker [--poll 1000] [--json]
+```
+
+Runs a background loop that dequeues and sends messages. Handles retries automatically (default 3 attempts). Gracefully shuts down on SIGINT/SIGTERM.
+
+### queue — Inspect the job queue
+
+```bash
+imsg-plus queue              # list all jobs
+imsg-plus queue counts       # show pending/processing/sent/failed counts
+imsg-plus queue purge        # delete completed and failed jobs
+```
+
+### cleanup — Remove old staged attachments
+
+```bash
+imsg-plus cleanup
+```
+
+Removes temporary attachment files older than 1 hour from `~/Library/Messages/Attachments/imsg/`.
+
+### Global options
+
+| Flag | Description |
+|---|---|
+| `--json` | Output as JSON lines (one object per line) |
+| `--db <path>` | Path to chat.db (default: `~/Library/Messages/chat.db`) |
+| `--verbose` | Verbose logging |
+| `--quiet` | Suppress non-essential output |
+| `--version` | Print version |
+
+## JSON-RPC server
+
+```bash
+imsg-plus rpc [--no-auto-read] [--no-auto-typing] [--verbose]
+```
+
+Starts a JSON-RPC 2.0 server over stdin/stdout. Designed for programmatic integration — no TCP port, no daemon. A parent process spawns `imsg-plus rpc` and communicates via line-delimited JSON.
 
 ### Methods
 
@@ -129,162 +171,197 @@ imsg-plus rpc [--no-auto-read] [--no-auto-typing]
 |---|---|
 | `chats.list` | List recent conversations |
 | `messages.history` | Fetch message history for a chat |
-| `messages.markRead` | Mark messages as read |
-| `send` | Send a message |
-| `tapback.send` | Send or remove a tapback reaction |
-| `typing.set` | Show/hide typing indicator |
-| `watch.subscribe` | Subscribe to new messages |
-| `watch.unsubscribe` | Unsubscribe from messages |
+| `messages.markRead` | Mark messages as read (requires bridge) |
+| `messages.react` | Send a tapback reaction |
+| `send` | Queue a message for delivery |
+| `queue.status` | Get job queue counts |
+| `typing.set` | Control typing indicator (requires bridge) |
+| `watch.subscribe` | Subscribe to new messages (returns subscription ID) |
+| `watch.unsubscribe` | Cancel a subscription |
+
+### `chats.list`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"chats.list","params":{"limit":10}}
+```
+
+Returns `{ "chats": [...] }` — each chat includes `id`, `name`, `identifier`, `guid`, `service`, `is_group`, `last_message_at`, and `participants`.
+
+### `messages.history`
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"messages.history","params":{"chat_id":1,"limit":50,"attachments":true}}
+```
+
+Optional filters: `participants` (array), `start`/`end` (ISO 8601).
+
+### `watch.subscribe` / `watch.unsubscribe`
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"watch.subscribe","params":{"chat_id":1}}
+```
+
+Returns `{ "subscription": <id> }`. New messages arrive as notifications:
+
+```json
+{"jsonrpc":"2.0","method":"message","params":{"subscription":1,"message":{...}}}
+```
+
+Subscriptions auto-restart on transient database errors and send a heartbeat every 15 minutes.
+
+### `send`
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"send","params":{"to":"+14155551212","text":"hello"}}
+```
+
+Messages go through the FIFO queue for reliable delivery. Supports `idempotency_key` for deduplication. You can target by `to` (direct) or `chat_id`/`chat_identifier`/`chat_guid` (group).
+
+### `typing.set` / `messages.markRead`
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"typing.set","params":{"handle":"+14155551212","state":true}}
+{"jsonrpc":"2.0","id":6,"method":"messages.markRead","params":{"handle":"+14155551212"}}
+```
 
 ### Auto-behaviors
 
-Both behaviors require the dylib/bridge to be active. If unavailable, they silently skip.
+When the bridge (dylib) is available, the RPC server enables two optional behaviors:
 
-- **Auto-read** — Incoming messages automatically get read receipts after ~1s delay. Disable with `--no-auto-read`.
-- **Auto-typing** — Outgoing sends show a typing indicator first (1.5–4s based on message length) before actually sending. Disable with `--no-auto-typing`.
+- **Auto-read** — Incoming messages automatically get read receipts (~1s delay). Disable with `--no-auto-read`.
+- **Auto-typing** — Outgoing sends show a typing indicator first (~1s before sending). Disable with `--no-auto-typing`.
 
-### Example
+Both silently skip if the bridge is unavailable.
 
-```bash
-# Start RPC server with defaults (auto-read + auto-typing on)
-imsg-plus rpc
+### Error codes
 
-# Start with auto-behaviors disabled
-imsg-plus rpc --no-auto-read --no-auto-typing
-```
-
-```json
-{"jsonrpc":"2.0","method":"chats.list","params":{"limit":5},"id":1}
-{"jsonrpc":"2.0","method":"send","params":{"to":"+14155551212","text":"hello"},"id":2}
-{"jsonrpc":"2.0","method":"tapback.send","params":{"handle":"+14155551212","guid":"ABC-123","type":"love"},"id":3}
-```
-
-### `send` chat routing
-
-The `send` method supports multiple ways to target a chat:
-
-| Parameter | Description |
-|---|---|
-| `to` | Phone number or email (direct send to a recipient) |
-| `chat_id` | Numeric chat ID from `chats.list` |
-| `chat_identifier` | Chat identifier string (e.g., `+14155551212`) |
-| `chat_guid` | Full chat GUID (e.g., `iMessage;-;+14155551212`) |
-
-Use **either** `to` **or** one of the `chat_*` parameters — not both. The `chat_*` params are useful for replying to existing chats (especially group chats) where you already know the chat ID from a `chats.list` or `watch.subscribe` response.
-
-## Attachment notes
-`--attachments` prints per-attachment lines with name, MIME, missing flag, and resolved path (tilde expanded). Only metadata is shown; files aren't copied.
+Standard JSON-RPC 2.0 error codes: `-32700` (parse error), `-32600` (invalid request), `-32601` (method not found), `-32602` (invalid params), `-32603` (internal error).
 
 ## JSON output
-`imsg-plus chats --json` emits one JSON object per chat with fields: `id`, `name`, `identifier`, `service`, `last_message_at`.
-`imsg-plus history --json` and `imsg-plus watch --json` emit one JSON object per message with fields: `id`, `chat_id`, `guid`, `reply_to_guid`, `sender`, `is_from_me`, `text`, `created_at`, `attachments` (array of metadata with `filename`, `transfer_name`, `uti`, `mime_type`, `total_bytes`, `is_sticker`, `original_path`, `missing`), `reactions`.
 
-Note: `reply_to_guid` and `reactions` are read-only metadata.
+All JSON output uses snake_case keys.
 
-## Permissions troubleshooting
+**Chat object:** `id`, `name`, `identifier`, `guid`, `service`, `is_group`, `last_message_at`, `participants`
 
-### Full Disk Access
-If you see "unable to open database file" or empty output:
-1. Grant Full Disk Access: System Settings → Privacy & Security → Full Disk Access → add your terminal.
-2. Ensure Messages.app is signed in and `~/Library/Messages/chat.db` exists.
+**Message object:** `id`, `chat_id`, `guid`, `reply_to_guid`, `sender`, `is_from_me`, `text`, `created_at`, `attachments` (array), `reactions` (array), `chat_identifier`, `chat_guid`, `chat_name`, `participants`, `is_group`
 
-### ⚠️ Automation Permission (Important!)
+**Attachment object:** `filename`, `transfer_name`, `uti`, `mime_type`, `total_bytes`, `is_sticker`, `original_path`, `missing`
 
-imsg-plus uses AppleScript to control Messages.app. macOS requires **Automation permission** for this to work.
+## Group chats
 
-**Symptoms when permission is missing:**
-- `send` commands hang forever (no error, just blocks)
-- Messages appear in chat.db but never actually send
-- Works fine from the web UI / database, but recipients never receive them
+Group chats are identified by `;+;` or `;-;` in the chat identifier (e.g., `iMessage;+;chat1234567890`).
 
-**How to fix:**
+To send to a group, use one of:
+- `--chat-id <rowid>` — stable within one database (preferred)
+- `--chat-identifier <handle>` — portable across machines
+- `--chat-guid <guid>` — portable across machines
 
-1. **From a GUI Terminal session** (not SSH), run:
-   ```bash
-   /usr/local/bin/imsg-plus send --to <your-phone> --text "permission test"
-   ```
-2. macOS will prompt: "imsg-plus wants to control Messages.app"
-3. Click **Allow**
+Inbound messages in JSON/RPC output include `chat_id`, `chat_identifier`, `chat_guid`, `chat_name`, `participants`, and `is_group` for routing.
 
-Or manually: System Settings → Privacy & Security → Automation → find `imsg-plus` → enable **Messages**
+## Advanced features setup
 
-### 🔄 Why Rebuilds Break Permissions
+Typing indicators and read receipts require injecting an Objective-C dylib into Messages.app to access Apple's private IMCore framework.
 
-**This is the #1 gotcha with imsg-plus.**
+### 1. Disable SIP
 
-imsg-plus is **ad-hoc signed** (no Apple Developer certificate). macOS ties Automation permissions to the binary's code signature. When you rebuild:
-
-1. The code signature changes
-2. macOS invalidates the previous Automation authorization
-3. imsg-plus silently loses permission to control Messages.app
-4. Since it often runs headlessly (daemon, SSH, cron), macOS can't prompt you — it just denies silently
-
-**After every rebuild, you must re-grant Automation permission** by running a send command from a GUI Terminal session (not SSH).
-
-### Long-term Fix: Developer ID Signing
-
-To make permissions persist across rebuilds, sign the binary with an Apple Developer ID certificate:
+Reboot into Recovery Mode, open Terminal, and run:
 
 ```bash
-# After building
+csrutil disable
+```
+
+Reboot normally. (Re-enable later with `csrutil enable` from Recovery Mode.)
+
+### 2. Build and install
+
+```bash
+make install
+```
+
+### 3. Launch Messages with injection
+
+```bash
+imsg-plus launch
+```
+
+This kills any running Messages instance, sets `DYLD_INSERT_LIBRARIES`, and starts a fresh one.
+
+### 4. Verify
+
+```bash
+imsg-plus status
+# Should show: Advanced features — Available
+```
+
+### How the bridge works
+
+The dylib (`imsg-plus-helper.dylib`) is loaded into the Messages.app process via `DYLD_INSERT_LIBRARIES`. It accesses IMCore classes (`IMChatRegistry`, `IMChat`) through the Objective-C runtime.
+
+Communication between the CLI and the dylib uses file-based IPC:
+- **Command file:** `~/Library/Containers/com.apple.MobileSMS/Data/.imsg-plus-command.json`
+- **Response file:** `~/Library/Containers/com.apple.MobileSMS/Data/.imsg-plus-response.json`
+- **Lock file:** `~/Library/Containers/com.apple.MobileSMS/Data/.imsg-plus-ready`
+
+Requests have a 10-second timeout. If the dylib is unresponsive, Messages.app is automatically relaunched.
+
+### Troubleshooting advanced features
+
+**"Advanced features: Not available"**
+- Run `imsg-plus launch` to restart Messages with injection
+- Verify IPC files exist: `ls ~/Library/Containers/com.apple.MobileSMS/Data/.imsg-plus-*`
+- Check SIP is disabled: `csrutil status`
+
+**Typing indicator doesn't appear**
+- The typing bubble shows on the *recipient's* device, not yours
+
+**Conflicts with BlueBubbles or other injectors**
+- Only one dylib can inject into Messages.app at a time — disable others first
+
+**Security note:** These features use Apple's private frameworks and require SIP disabled, which reduces system security. Intended for personal use. Re-enable SIP when not needed.
+
+## Permissions
+
+### Full Disk Access
+
+Required to read `~/Library/Messages/chat.db`.
+
+System Settings → Privacy & Security → Full Disk Access → add your terminal app.
+
+**Symptoms when missing:** "unable to open database file" or empty output.
+
+### Automation permission
+
+Required for AppleScript to control Messages.app (used by `send` and `react`).
+
+**Symptoms when missing:** `send` commands hang forever with no error. Messages appear in the database but recipients never receive them.
+
+**To grant:** From a **GUI Terminal session** (not SSH), run:
+
+```bash
+imsg-plus send --to <your-phone> --text "permission test"
+```
+
+macOS will prompt "imsg-plus wants to control Messages.app" — click Allow.
+
+Or manually: System Settings → Privacy & Security → Automation → imsg-plus → enable Messages.
+
+### Why rebuilds break permissions
+
+imsg-plus is ad-hoc signed. macOS ties Automation permissions to the binary's code signature. Every rebuild changes the signature, so macOS silently revokes permission. **After every rebuild, re-grant Automation permission** from a GUI Terminal session.
+
+To make permissions persist across rebuilds, sign with an Apple Developer ID:
+
+```bash
 codesign --force --sign "Developer ID Application: Your Name (TEAMID)" /usr/local/bin/imsg-plus
 ```
 
-With proper signing, macOS recognizes rebuilds as the "same" app and preserves permissions.
+This requires an [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
 
-**Note:** This requires an [Apple Developer Program](https://developer.apple.com/programs/) membership ($99/year).
+## Clawdbot integration
 
-## Advanced Features Setup (imsg-plus)
-
-The typing, read receipt, and tapback features require injecting a dylib into Messages.app to access Apple's private IMCore framework.
-
-### Prerequisites
-
-1. **Disable SIP** (System Integrity Protection):
-   - Reboot into Recovery Mode (hold Cmd+R during startup, or power button on Apple Silicon)
-   - Open Terminal from the Utilities menu
-   - Run: `csrutil disable`
-   - Reboot normally
-
-2. **Full Disk Access**: Grant your terminal FDA permission in System Settings → Privacy & Security → Full Disk Access
-
-### Setup
-
-```bash
-make install          # builds and installs binary + dylib
-imsg-plus launch      # starts Messages.app with injection
-imsg-plus status      # verify: should show "✅ Available"
-```
-
-That's it. The `launch` command replaces the manual `DYLD_INSERT_LIBRARIES` dance — it kills any running Messages instance, injects the dylib, and launches a fresh one.
-
-### Troubleshooting
-
-**"Advanced features: ❌ Not available"**
-- Run `imsg-plus launch` to restart Messages with injection
-- Check IPC files exist: `ls ~/Library/Containers/com.apple.MobileSMS/Data/.imsg-plus-*`
-
-**Typing indicator doesn't appear**
-- Typing bubbles show on the *recipient's* device, not yours
-- Test with another device or ask the recipient to confirm
-
-**Conflicts with BlueBubbles**
-- Only one dylib can inject into Messages.app at a time
-- Disable BlueBubbles before using imsg-plus advanced features
-
-**Security Warning**
-- These features use Apple's private IMCore framework
-- Requires SIP disabled, which reduces system security
-- The Automation permission (System Settings → Privacy & Security → Automation) is required for AppleScript-based sending. Without it, send commands hang silently — no error, just blocks forever waiting for an auth dialog.
-- Intended for personal use and testing only
-- Re-enable SIP when not needed: `csrutil enable` (from Recovery Mode)
-
-## Clawdbot Integration
-
-imsg-plus can serve as the iMessage backend for [Clawdbot](https://github.com/clawdbot/clawdbot).
+imsg-plus serves as the iMessage backend for [Clawdbot](https://github.com/clawdbot/clawdbot). Clawdbot spawns `imsg-plus rpc` and communicates over stdin/stdout.
 
 ```json
-// clawdbot.json
 {
   "channels": {
     "imessage": {
@@ -294,17 +371,12 @@ imsg-plus can serve as the iMessage backend for [Clawdbot](https://github.com/cl
 }
 ```
 
-Clawdbot uses RPC mode (`imsg-plus rpc`) for all communication. With the dylib active, Clawdbot automatically gets:
-- **Typing indicators** before replies (simulates natural typing delay)
-- **Read receipts** on incoming messages
+With the dylib active, Clawdbot automatically gets typing indicators before replies and read receipts on incoming messages.
 
-**Recommended setup:**
 ```bash
-imsg-plus launch       # start Messages with injection
-clawdbot start         # then start Clawdbot
+imsg-plus launch    # start Messages with injection
+clawdbot start      # then start Clawdbot
 ```
-
-Or install the [LaunchAgent](#launchagent) for auto-start on login.
 
 ## LaunchAgent
 
@@ -339,64 +411,72 @@ cp com.imsg-plus.messages-helper.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.imsg-plus.messages-helper.plist
 ```
 
-## Watchdog
+## Architecture
 
-The watchdog monitors macOS `imagent` logs for sync failures and automatically restarts Messages.app with dylib injection when issues are detected. This is useful for long-running setups (like Clawdbot) where Messages.app can occasionally lose its connection to iCloud.
-
-### What it monitors
-
-The watchdog watches for `imagent` XPC/sandbox errors in the system logs — these indicate Messages.app has lost sync with iCloud and needs a restart to recover.
-
-### Usage
-
-```bash
-# Install and start the watchdog (one command does it all)
-imsg-plus watchdog
-
-# Check if it's running
-imsg-plus watchdog --status
-
-# View real-time logs
-imsg-plus watchdog --logs
-
-# Stop and uninstall
-imsg-plus watchdog --uninstall
-
-# Run in foreground (used internally by LaunchAgent)
-imsg-plus watchdog --run
+```
+src/
+  index.ts      CLI entry point and command dispatcher
+  db.ts         Read-only SQLite access to ~/Library/Messages/chat.db
+  send.ts       Message sending and reactions via AppleScript
+  watch.ts      Real-time message streaming (fs events + polling)
+  bridge.ts     IPC bridge to injected dylib (typing, read receipts)
+  queue.ts      SQLite-backed FIFO job queue (~/.imsg-plus/queue.db)
+  worker.ts     Background job processor with retry logic
+  rpc.ts        JSON-RPC 2.0 server over stdin/stdout
+  filter.ts     Query filter parsing (participants, dates)
+  json.ts       Snake_case JSON serialization
+  types.ts      TypeScript interfaces (Chat, Message, Attachment, etc.)
 ```
 
-### How it works
+### Data flow
 
-1. Running `imsg-plus watchdog` installs a LaunchAgent (`com.imsg-plus.watchdog.plist`)
-2. The LaunchAgent runs `imsg-plus watchdog --run` as a background daemon
-3. The daemon monitors `/var/log/system.log` for imagent errors
-4. When errors are detected, it runs `imsg-plus launch` to restart Messages.app with proper dylib injection
-5. The watchdog survives reboots and auto-starts on login
-
-### Recommended setup
-
-For reliable iMessage automation:
-
-```bash
-imsg-plus watchdog     # install watchdog (runs forever, survives reboots)
-imsg-plus status       # verify everything is working
+```
+CLI / RPC Client
+       │
+       ▼
+  index.ts / rpc.ts  ─── command dispatch
+       │
+  ┌────┼─────┬──────────┬──────────┐
+  │    │     │          │          │
+  ▼    ▼     ▼          ▼          ▼
+db.ts send.ts watch.ts queue.ts bridge.ts
+  │      │       │        │         │
+  │      ▼       │        ▼         ▼
+  │  AppleScript │    worker.ts   dylib
+  │              │                (IMCore)
+  ▼              ▼
+chat.db       chat.db
+(read-only)   (fs events)
 ```
 
-The watchdog replaces the need for the manual LaunchAgent setup above — it handles both the initial launch and ongoing health monitoring.
+## Development
 
-## Testing
 ```bash
-make test
+npm install                     # install dependencies
+make dev ARGS="chats --limit 5" # run in dev mode (tsx, no build step)
+make build                      # compile TypeScript + dylib
+npm test                        # run tests (vitest)
+npx tsc --noEmit                # type-check only
 ```
 
-Note: `make test` applies a small patch to SQLite.swift to silence a SwiftPM warning about `PrivacyInfo.xcprivacy`.
+### Testing
 
-## Linting & formatting
+Tests use [vitest](https://vitest.dev) with an in-memory SQLite database and `memfs` for filesystem mocking. No live Messages database needed.
+
 ```bash
-make lint
-make format
+npm test                        # run all tests
+npx vitest run src/__tests__/rpc.test.ts  # run a specific test file
 ```
 
-## Core library
-The reusable Swift core lives in `Sources/IMsgCore` and is consumed by the CLI target. Apps can depend on the `IMsgCore` library target directly.
+### Releasing
+
+1. Update version in `package.json` and `CHANGELOG.md`
+2. Ensure tests pass: `npm test`
+3. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`
+4. Create GitHub release with `gh release create`
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Originally created by [Peter Steinberger](https://github.com/steipete/imsg). v2 rewrite by [Micah Rich](https://github.com/micahbrich).

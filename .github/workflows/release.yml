@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to (re)release (e.g. v0.1.0)"
+        description: "Tag to (re)release (e.g. v2.1.0)"
         required: true
         type: string
 
@@ -20,67 +20,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
 
       - name: Checkout release tag
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: git checkout ${{ inputs.tag }}
 
-      - name: Resolve packages
-        run: swift package resolve
+      - run: npm ci
 
-      - name: Patch dependencies
-        run: scripts/patch-deps.sh
+      - name: Typecheck
+        run: npx tsc --noEmit
 
-      - name: Sync version
-        run: scripts/generate-version.sh
+      - name: Test
+        run: npm test
 
       - name: Build
-        run: swift build -c release --product imsg
-
-      - name: Codesign
-        run: codesign --force --sign - --entitlements Resources/imsg.entitlements --identifier com.steipete.imsg .build/release/imsg
-
-      - name: Package artifact
-        run: |
-          mkdir -p dist
-          cp .build/release/imsg dist/imsg
-          for bundle in .build/release/*.bundle; do
-            if [ -e "$bundle" ]; then
-              cp -R "$bundle" dist/
-            fi
-          done
-          (
-            cd dist
-            shopt -s nullglob
-            bundles=( *.bundle )
-            if [ ${#bundles[@]} -gt 0 ]; then
-              zip -r imsg-macos.zip imsg "${bundles[@]}"
-            else
-              zip -r imsg-macos.zip imsg
-            fi
-          )
-
-      - name: Publish release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/imsg-macos.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make build
 
       - name: Update GitHub release notes from CHANGELOG
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ inputs.tag }}
         run: |
           version="${TAG#v}"
           notes_file="/tmp/release-notes.md"
@@ -96,4 +60,5 @@ jobs:
             exit 1
           fi
 
+          gh release create "$TAG" -t "$TAG" --notes-file "$notes_file" || \
           gh release edit "$TAG" --notes-file "$notes_file"
