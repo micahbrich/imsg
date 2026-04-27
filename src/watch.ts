@@ -7,6 +7,7 @@ export interface WatchOptions {
   sinceRowId?: number
   debounce?: number
   filter?: Filter
+  excludeFromMe?: boolean
 }
 
 export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Message> {
@@ -16,7 +17,7 @@ export async function* watch(db: DB, opts: WatchOptions = {}): AsyncGenerator<Me
 
   // Poll for new messages (filters are pushed into the SQL query)
   function poll(): Message[] {
-    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100, filter })
+    const msgs = db.messagesAfter(cursor, { chatId: opts.chatId, limit: 100, filter, excludeFromMe: opts.excludeFromMe })
     for (const msg of msgs) {
       if (msg.id > cursor) cursor = msg.id
     }

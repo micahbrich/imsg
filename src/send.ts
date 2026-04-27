@@ -117,25 +117,26 @@ end run
 // Pure function: options in → exactly one of recipient/chatTarget out
 
 export function pickRecipient(opts: SendOptions, db?: DB) {
-  const service = opts.service ?? "auto"
-  const region = opts.region ?? "US"
+  const resolved = applyTargetSpec(opts)
+  const service = resolved.service ?? "auto"
+  const region = resolved.region ?? "US"
   const directService = service === "auto" ? "imessage" : service
-  const hasChat = opts.chatId != null || opts.chatIdentifier || opts.chatGuid
+  const hasChat = resolved.chatId != null || resolved.chatIdentifier || resolved.chatGuid
 
-  if (opts.to && hasChat) throw new Error("Use --to or --chat-*, not both")
-  if (!opts.to && !hasChat) throw new Error("--to or --chat-id is required")
+  if (resolved.to && hasChat) throw new Error("Use --to or --chat-*, not both")
+  if (!resolved.to && !hasChat) throw new Error("--to or --chat-id is required")
 
   // Direct send to a phone/email
-  if (opts.to) {
-    return { recipient: normalize(opts.to, region), chatTarget: "", service: directService }
+  if (resolved.to) {
+    return { recipient: normalize(resolved.to, region), chatTarget: "", service: directService }
   }
 
   // Look up chat by numeric ID
-  let identifier = opts.chatIdentifier ?? ""
-  let guid = opts.chatGuid ?? ""
-  if (opts.chatId != null) {
-    const info = db?.chat(opts.chatId)
-    if (!info) throw new Error(`Unknown chat id ${opts.chatId}`)
+  let identifier = resolved.chatIdentifier ?? ""
+  let guid = resolved.chatGuid ?? ""
+  if (resolved.chatId != null) {
+    const info = db?.chat(resolved.chatId)
+    if (!info) throw new Error(`Unknown chat id ${resolved.chatId}`)
     identifier = info.identifier
     guid = info.guid
   }
@@ -149,6 +150,64 @@ export function pickRecipient(opts: SendOptions, db?: DB) {
   const target = guid || identifier
   if (!target) throw new Error("Missing chat identifier or guid")
   return { recipient: "", chatTarget: target, service }
+}
+
+export function applyTargetSpec(opts: SendOptions): SendOptions {
+  if (!opts.to) return opts
+  if (opts.chatId != null || opts.chatIdentifier || opts.chatGuid) return opts
+
+  const target = opts.to.trim()
+  if (!target) return opts
+
+  const prefixedHandle = target.match(/^(imessage|sms):(.+)$/)
+  if (prefixedHandle) {
+    const prefixedService = prefixedHandle[1] as Service
+    const handle = prefixedHandle[2].trim()
+    if (!handle) throw new Error(`Invalid target: ${target}`)
+    if (opts.service && opts.service !== "auto" && opts.service !== prefixedService) {
+      throw new Error(`Conflicting service: ${opts.service} and ${prefixedService}`)
+    }
+    return { ...opts, to: handle, service: prefixedService }
+  }
+
+  if (target.startsWith("chat_id:")) {
+    const chatId = Number.parseInt(target.slice("chat_id:".length), 10)
+    if (!Number.isFinite(chatId)) throw new Error(`Invalid chat target: ${target}`)
+    return { ...opts, to: undefined, chatId }
+  }
+
+  if (target.startsWith("chat_guid:")) {
+    const chatGuid = target.slice("chat_guid:".length).trim()
+    if (!chatGuid) throw new Error(`Invalid chat target: ${target}`)
+    return { ...opts, to: undefined, chatGuid }
+  }
+
+  if (target.startsWith("chat_identifier:")) {
+    const chatIdentifier = target.slice("chat_identifier:".length).trim()
+    if (!chatIdentifier) throw new Error(`Invalid chat target: ${target}`)
+    return { ...opts, to: undefined, chatIdentifier }
+  }
+
+  return { ...opts, to: target }
+}
+
+export function typingHandle(opts: SendOptions, db?: DB): string | null {
+  const resolved = applyTargetSpec(opts)
+  const region = resolved.region ?? "US"
+
+  if (resolved.to) return normalize(resolved.to, region)
+
+  if (resolved.chatIdentifier && looksLikeHandle(resolved.chatIdentifier)) {
+    return normalize(resolved.chatIdentifier, region)
+  }
+
+  if (resolved.chatId != null) {
+    const info = db?.chat(resolved.chatId)
+    if (!info || !looksLikeHandle(info.identifier)) return null
+    return normalize(info.identifier, region)
+  }
+
+  return null
 }
 
 export function normalize(input: string, region: string): string {

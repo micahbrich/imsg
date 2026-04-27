@@ -301,20 +301,20 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
         const sentCursor = db.maxRowId()
         await send(input, db)
 
-        let sentRef = await confirmSentMessage(db, sentCursor, input, confirmTimeoutMs, confirmPollMs)
+        // AppleScript accepted the send — Messages.app has the message.
+        // Try a short chat.db confirmation pass to enrich the response with
+        // message_id/guid. If chat.db hasn't written it yet (common on loaded
+        // systems), return accepted (non-error) so OpenClaw does NOT retry.
+        const sentRef = await confirmSentMessage(db, sentCursor, input, confirmTimeoutMs, confirmPollMs)
         if (!sentRef) {
-          await sleep(10_000)
-          sentRef = await confirmSentMessage(db, sentCursor, input, 20_000, confirmPollMs)
-        }
-        if (!sentRef) {
-          const reason = "message may have been sent but was not confirmed in chat.db"
-          idempotency.finalize(idempotencyKey, "unknown_outcome", resultTtlSecs, { error: reason })
-          throw new RpcMethodError(OUTCOME_UNKNOWN_CODE, "Unknown outcome", {
-            outcome: "unknown_outcome",
-            idempotency_key: idempotencyKey,
+          idempotency.finalize(idempotencyKey, "accepted", resultTtlSecs, {})
+          return {
+            ok: true,
+            outcome: "accepted",
+            unconfirmed: true,
             duplicate: false,
-            error: reason,
-          })
+            idempotency_key: idempotencyKey,
+          }
         }
 
         idempotency.finalize(idempotencyKey, "sent", resultTtlSecs, {
@@ -346,13 +346,17 @@ export async function serve(db: DB, bridge: Bridge, opts: RPCOptions = {}): Prom
           })
         }
 
-        idempotency.finalize(idempotencyKey, "unknown_outcome", resultTtlSecs, { error: message })
-        throw new RpcMethodError(OUTCOME_UNKNOWN_CODE, "Unknown outcome", {
-          outcome: "unknown_outcome",
-          idempotency_key: idempotencyKey,
+        // AppleScript timed out or gave an ambiguous error — message may have
+        // already been delivered. Return accepted (non-error) so OpenClaw does
+        // NOT retry and risk a duplicate send.
+        idempotency.finalize(idempotencyKey, "accepted", resultTtlSecs, { error: message })
+        return {
+          ok: true,
+          outcome: "accepted",
+          unconfirmed: true,
           duplicate: false,
-          error: message,
-        })
+          idempotency_key: idempotencyKey,
+        }
       } finally {
         if (useFallbackTyping && typingTarget) {
           bridge.setTyping(typingTarget, false).catch((err) => log(`[typing] fallback off error: ${err.message}`))

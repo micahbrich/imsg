@@ -27,9 +27,6 @@ imsg-plus <command> [options]
   history     Show messages for a chat
   watch       Stream incoming messages
   send        Send a message (text and/or attachment)
-  enqueue     Queue a message for background delivery
-  worker      Run background worker to process the queue
-  queue       List queued jobs (subcommands: counts, purge)
   react       Send a tapback reaction
   cleanup     Remove old staged attachments
   typing      Control typing indicator
@@ -58,9 +55,6 @@ imsg-plus watch --chat-id 1 --attachments --json
 # Send a message
 imsg-plus send --to "+14155551212" --text "hello" --file ~/pic.jpg
 
-# Queue a message for reliable delivery (retries on failure)
-imsg-plus enqueue --to "+14155551212" --text "hello" --retries 3
-
 # Typing indicator
 imsg-plus typing --handle "+14155551212" --state on
 
@@ -77,30 +71,13 @@ imsg-plus status
 imsg-plus launch
 ```
 
-## Message Queue
+## Send Reliability
 
-v2 adds a persistent message queue for reliable delivery with retries and deduplication.
+`send` is direct and uncertainty-first:
 
-```bash
-# Queue a message (returns immediately)
-imsg-plus enqueue --to "+14155551212" --text "hello"
-
-# Run the worker to process queued messages
-imsg-plus worker --json
-
-# Check queue status
-imsg-plus queue counts
-
-# List all jobs
-imsg-plus queue
-
-# Purge completed/failed jobs
-imsg-plus queue purge
-```
-
-The queue uses SQLite (`~/.imsg-plus/queue.db`) with WAL mode. Jobs are FIFO with idempotency keys to prevent duplicate sends. Failed jobs retry up to 3 times (configurable with `--retries`).
-
-In RPC mode, the queue worker runs automatically as an embedded subprocess — no separate daemon needed.
+- Automatic idempotency is always on (SQLite-backed TTL cache, default 10s for auto-generated keys, 120s for explicit caller-provided keys).
+- If delivery cannot be confirmed in `chat.db`, RPC returns `unknown_outcome` instead of retrying.
+- Duplicate requests inside the TTL window return `outcome: "duplicate"` plus a machine-readable `reason` field.
 
 ## RPC Server
 
@@ -118,8 +95,7 @@ imsg-plus rpc [--no-auto-read] [--no-auto-typing] [--verbose]
 | `messages.history` | Fetch message history for a chat |
 | `messages.markRead` | Mark messages as read |
 | `messages.react` | Send a tapback reaction |
-| `send` | Queue a message for delivery |
-| `queue.status` | Get queue job counts |
+| `send` | Send directly with explicit outcome |
 | `typing.set` | Show/hide typing indicator |
 | `watch.subscribe` | Subscribe to new messages |
 | `watch.unsubscribe` | Unsubscribe from messages |
@@ -131,15 +107,13 @@ The server emits JSON-RPC notifications (no `id`) for events:
 | Notification | Description |
 |---|---|
 | `message` | New message received |
-| `queue.sent` | Queued message delivered |
-| `queue.failed` | Queued message failed |
 | `stale_send` | Sent message not appearing in chat.db |
 | `heartbeat` | Keep-alive (every 15 min) |
 
 ### Auto-behaviors
 
 - **Auto-read** — Incoming messages get read receipts after ~1s. Disable with `--no-auto-read`.
-- **Auto-typing** — *(Deprecated in v2.1.1 — typing is now handled by the gateway via `typingMode`)*
+- **Auto-typing fallback** — If the caller does not send explicit `typing.set` signals, RPC wraps direct sends with best-effort typing on/off.
 
 ### Send routing
 
@@ -252,13 +226,12 @@ make clean       # remove build artifacts
 ```
 src/
   index.ts    CLI entry point, command routing
-  rpc.ts      JSON-RPC server, subscriptions, embedded queue worker
+  rpc.ts      JSON-RPC server, subscriptions, direct send outcomes
   db.ts       Read-only SQLite access to chat.db
+  idempotency.ts SQLite-backed idempotency state machine (TTL + atomic claims)
   send.ts     AppleScript-based message sending
   watch.ts    Event-driven message streaming (fs.watch + fallback poll)
   bridge.ts   File-based IPC with Messages.app dylib (typing, read receipts)
-  queue.ts    SQLite-backed persistent job queue
-  worker.ts   FIFO queue processor with retry
   filter.ts   Message filtering (participants, date range)
   json.ts     Message serialization
   types.ts    Shared type definitions

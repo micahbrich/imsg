@@ -20,6 +20,13 @@ export function dateToNanos(date: Date): number {
 
 export type DB = ReturnType<typeof open>
 
+export interface SentMessageMatchCriteria {
+  text?: string
+  service?: string
+  requireAttachment?: boolean
+  chatId?: number
+}
+
 export function open(path = DEFAULT_PATH) {
   if (!existsSync(path)) {
     throw new Error(
@@ -134,6 +141,7 @@ export function open(path = DEFAULT_PATH) {
     maxRowId,
     undeliveredMessages,
     findSentMessage,
+    findSentMessageMatch,
     close: (): void => { db.close() },
   }
 
@@ -177,6 +185,49 @@ export function open(path = DEFAULT_PATH) {
       .get(afterRowId)
     if (!row) return null
     return { id: row.id, guid: row.guid ?? "" }
+  }
+
+  function findSentMessageMatch(
+    afterRowId: number,
+    criteria: SentMessageMatchCriteria = {}
+  ): { id: number; guid: string } | null {
+    const rows: any[] = db
+      .prepare(
+        `SELECT m.ROWID as id,
+                ${schema.guid} as guid,
+                IFNULL(m.text, '') as text,
+                ${schema.body} as body,
+                IFNULL(m.service, '') as service,
+                cmj.chat_id as chatId,
+                (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id = m.ROWID) as attachCount
+         FROM message m
+         LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+         WHERE m.ROWID > ? AND m.is_from_me = 1
+         ORDER BY m.ROWID ASC
+         LIMIT 50`
+      )
+      .all(afterRowId)
+
+    const expectedText = criteria.text?.trim()
+    const expectedService = criteria.service?.toLowerCase().trim()
+    const expectedChatId = criteria.chatId
+    const requireAttachment = criteria.requireAttachment ?? false
+
+    for (const row of rows) {
+      // On modern macOS, message.text can be NULL with text stored in attributedBody
+      const rowText = String(row.text ?? "").trim() || parseAttributedBody(row.body ?? null).trim()
+      if (expectedText && rowText !== expectedText) continue
+      if (expectedChatId != null && Number(row.chatId ?? 0) !== expectedChatId) continue
+      if (requireAttachment && Number(row.attachCount ?? 0) < 1) continue
+      if (expectedService && expectedService !== "auto") {
+        const actual = String(row.service ?? "").toLowerCase()
+        if (expectedService === "sms" && !actual.includes("sms")) continue
+        if (expectedService === "imessage" && actual.includes("sms")) continue
+      }
+      return { id: row.id, guid: row.guid ?? "" }
+    }
+
+    return null
   }
 
   function chats(limit = 20): Chat[] {
@@ -263,13 +314,16 @@ export function open(path = DEFAULT_PATH) {
       .map((row: any) => parseRow(row, chatId))
   }
 
-  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number; filter?: Filter } = {}): Message[] {
+  function messagesAfter(afterRowId: number, opts: { chatId?: number; limit?: number; filter?: Filter; excludeFromMe?: boolean } = {}): Message[] {
     const limit = opts.limit ?? 100
     const bindings: any[] = [afterRowId]
     let chatWhere = ""
     if (opts.chatId != null) {
       chatWhere = " AND cmj.chat_id = ?"
       bindings.push(opts.chatId)
+    }
+    if (opts.excludeFromMe) {
+      chatWhere += " AND m.is_from_me = 0"
     }
     chatWhere += applyFilter(opts.filter, bindings)
     bindings.push(limit)

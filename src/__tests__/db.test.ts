@@ -282,6 +282,78 @@ describe("findSentMessage", () => {
   })
 })
 
+describe("findSentMessageMatch", () => {
+  it("matches when message.text is populated", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const nanos = dateToNanos(new Date())
+    rawDb.exec(`
+      INSERT INTO message VALUES (20, 1, 'Hello there', ${nanos}, 1, 'iMessage', 'guid-20', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 20);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      const match = imsg.findSentMessageMatch(5, { text: "Hello there" })
+      expect(match).toEqual({ id: 20, guid: "guid-20" })
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("matches via attributedBody when message.text is NULL", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const nanos = dateToNanos(new Date())
+
+    // Build an attributedBody blob that encodes the text 'Hello attr'
+    const text = "Hello attr"
+    const marker = Buffer.from([0x01, 0x2b])
+    const terminator = Buffer.from([0x86, 0x84])
+    const textBuf = Buffer.from(text, "utf8")
+    const attrBody = Buffer.concat([marker, textBuf, terminator])
+
+    rawDb.exec(`
+      INSERT INTO message VALUES (21, 1, NULL, ${nanos}, 1, 'iMessage', 'guid-21', NULL, NULL, ?, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 21);
+    `)
+    // Use a prepared statement to insert the blob
+    rawDb.prepare("UPDATE message SET attributedBody = ? WHERE ROWID = 21").run(attrBody)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      // Should match even though message.text is NULL
+      const match = imsg.findSentMessageMatch(5, { text: "Hello attr" })
+      expect(match).toEqual({ id: 21, guid: "guid-21" })
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+
+  it("returns null when text does not match", () => {
+    const tmpPath = createDeliveryTestDB()
+    const rawDb = new Database(tmpPath)
+    const nanos = dateToNanos(new Date())
+    rawDb.exec(`
+      INSERT INTO message VALUES (22, 1, 'Different text', ${nanos}, 1, 'iMessage', 'guid-22', NULL, NULL, NULL, NULL, 0, 0, 0, 1, 0);
+      INSERT INTO chat_message_join VALUES (1, 22);
+    `)
+    rawDb.close()
+
+    const imsg = open(tmpPath)
+    try {
+      expect(imsg.findSentMessageMatch(5, { text: "Hello there" })).toBeNull()
+    } finally {
+      imsg.close()
+      unlinkSync(tmpPath)
+    }
+  })
+})
+
 describe("open (file-based)", () => {
   function createTestDB(): string {
     const tmpPath = join(tmpdir(), `imsg-open-${Date.now()}.db`)

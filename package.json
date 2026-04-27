@@ -1,9 +1,10 @@
 {
   "name": "imsg-plus",
-  "version": "2.1.1",
+  "version": "3.0.2",
   "description": "Send and read iMessage / SMS from the terminal",
   "type": "module",
   "bin": {
+    "imsg": "dist/index.js",
     "imsg-plus": "dist/index.js"
   },
   "scripts": {

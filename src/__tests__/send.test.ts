@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { pickRecipient, normalize, looksLikeHandle } from "../send.js"
+import { pickRecipient, applyTargetSpec, normalize, looksLikeHandle, typingHandle } from "../send.js"
 
 describe("pickRecipient", () => {
   it("sends directly to a phone number", () => {
@@ -65,6 +65,33 @@ describe("pickRecipient", () => {
     const result = pickRecipient({ chatIdentifier: "chat;+;group123", text: "hi" })
     expect(result.chatTarget).toBe("chat;+;group123")
   })
+
+  it("parses prefixed iMessage handles", () => {
+    const result = pickRecipient({ to: "imessage:+15551234567", text: "hi" })
+    expect(result.recipient).toBe("+15551234567")
+    expect(result.service).toBe("imessage")
+  })
+
+  it("parses prefixed SMS handles", () => {
+    const result = pickRecipient({ to: "sms:+15551234567", text: "hi" })
+    expect(result.recipient).toBe("+15551234567")
+    expect(result.service).toBe("sms")
+  })
+
+  it("parses explicit chat targets from --to", () => {
+    const result = pickRecipient({ to: "chat_guid:iMessage;+;chat999", text: "hi" })
+    expect(result.chatTarget).toBe("iMessage;+;chat999")
+  })
+})
+
+describe("applyTargetSpec", () => {
+  it("converts chat_id targets into chatId", () => {
+    expect(applyTargetSpec({ to: "chat_id:42" })).toEqual({ to: undefined, chatId: 42 })
+  })
+
+  it("keeps plain handles as direct targets", () => {
+    expect(applyTargetSpec({ to: "user@example.com" })).toEqual({ to: "user@example.com" })
+  })
 })
 
 describe("normalize", () => {
@@ -103,5 +130,19 @@ describe("looksLikeHandle", () => {
 
   it("returns false for empty string", () => {
     expect(looksLikeHandle("")).toBe(false)
+  })
+})
+
+describe("typingHandle", () => {
+  it("returns a normalized handle for prefixed targets", () => {
+    expect(typingHandle({ to: "sms:(555) 123-4567" })).toBe("+15551234567")
+  })
+
+  it("resolves chatId handles through the database", () => {
+    const fakeDb = {
+      chat: () => ({ id: 1, identifier: "+15559876543", guid: "iMessage;-;+15559876543", name: "", service: "iMessage", isGroup: false }),
+    } as any
+
+    expect(typingHandle({ chatId: 1 }, fakeDb)).toBe("+15559876543")
   })
 })
