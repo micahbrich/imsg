@@ -45,15 +45,18 @@ clean:
 install: build build-dylib
 	@mkdir -p /usr/local/bin /usr/local/lib
 	@cp .build/release/imsg-plus-helper.dylib /usr/local/lib/imsg-plus-helper.dylib
+	@ln -sf $$(pwd)/dist/index.js /usr/local/bin/imsg
 	@ln -sf $$(pwd)/dist/index.js /usr/local/bin/imsg-plus
+	@chmod +x /usr/local/bin/imsg
 	@chmod +x /usr/local/bin/imsg-plus
-	@echo "Installed. Run 'imsg-plus' from anywhere."
+	@echo "Installed. Run 'imsg' or 'imsg-plus' from anywhere."
 	@echo ""
 	@echo "To enable typing/read receipts:"
 	@echo "  1. Disable SIP"
-	@echo "  2. imsg-plus launch"
+	@echo "  2. imsg launch"
 
 uninstall:
+	@rm -f /usr/local/bin/imsg
 	@rm -f /usr/local/bin/imsg-plus
 	@rm -f /usr/local/lib/imsg-plus-helper.dylib
 	@echo "Uninstalled."

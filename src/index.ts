@@ -12,8 +12,6 @@ import { serve } from "./rpc.js"
 import { serializeMessage } from "./json.js"
 import { parseFilter } from "./filter.js"
 import { parseService } from "./types.js"
-import { openQueue } from "./queue.js"
-import { runWorker } from "./worker.js"
 import type { Message, Attachment } from "./types.js"
 
 // --- Args ---
@@ -49,8 +47,6 @@ const args = arg(
     "--verbose": Boolean,
     "--no-auto-read": Boolean,
     "--no-auto-typing": Boolean,
-    "--poll": Number,
-    "--retries": Number,
     "-h": "--help",
     "-V": "--version",
   },
@@ -106,9 +102,6 @@ async function main() {
     case "launch": return launchCmd()
     case "react": return reactCmd()
     case "cleanup": return cleanupCmd()
-    case "enqueue": return enqueueCmd()
-    case "worker": return workerCmd()
-    case "queue": return queueCmd()
     case "rpc": return rpcCmd()
     default:
       console.error(`Unknown command: ${command}\n`)
@@ -155,17 +148,9 @@ async function watchCmd() {
 
 async function sendCmd() {
   const service = parseService(args["--service"])
+  const input = sendInput(service)
   await send(
-    {
-      to: args["--to"],
-      chatId: args["--chat-id"],
-      chatIdentifier: args["--chat-identifier"],
-      chatGuid: args["--chat-guid"],
-      text: args["--text"],
-      file: args["--file"],
-      service,
-      region: args["--region"],
-    },
+    input,
     openDB()
   )
   output({ status: "sent" }, "sent")
@@ -274,86 +259,6 @@ async function cleanupCmd() {
   output({ removed }, `Removed ${removed} old staged attachment${removed === 1 ? "" : "s"}`)
 }
 
-function enqueueCmd() {
-  const service = parseService(args["--service"])
-  const queue = openQueue()
-  const { job, duplicate } = queue.enqueue({
-    to: args["--to"],
-    chatId: args["--chat-id"],
-    chatIdentifier: args["--chat-identifier"],
-    chatGuid: args["--chat-guid"],
-    text: args["--text"],
-    file: args["--file"],
-    service,
-    region: args["--region"],
-    maxAttempts: args["--retries"] ?? 3,
-  })
-  queue.close()
-  output(
-    { status: duplicate ? "duplicate" : "queued", id: job.id },
-    duplicate ? `duplicate (existing job ${job.id})` : `queued (job ${job.id})`
-  )
-}
-
-async function workerCmd() {
-  const queue = openQueue()
-  const db = openDB()
-  const ac = new AbortController()
-
-  process.on("SIGINT", () => ac.abort())
-  process.on("SIGTERM", () => ac.abort())
-
-  await runWorker(queue, db, {
-    pollMs: args["--poll"] ?? 1000,
-    signal: ac.signal,
-    onSent: (job) => {
-      if (json) console.log(JSON.stringify({ event: "sent", id: job.id }))
-    },
-    onFail: (job, error) => {
-      if (json) console.log(JSON.stringify({ event: "failed", id: job.id, error, status: job.status }))
-    },
-  })
-
-  queue.close()
-}
-
-function queueCmd() {
-  const queue = openQueue()
-  const sub = args._[1]
-
-  if (sub === "purge") {
-    const removed = queue.purge()
-    queue.close()
-    output({ removed }, `Purged ${removed} completed/failed job${removed === 1 ? "" : "s"}`)
-    return
-  }
-
-  if (sub === "counts") {
-    const counts = queue.counts()
-    queue.close()
-    if (json) console.log(JSON.stringify(counts))
-    else {
-      for (const [status, count] of Object.entries(counts)) {
-        console.log(`${status}: ${count}`)
-      }
-    }
-    return
-  }
-
-  // Default: list all jobs
-  const jobs = queue.all()
-  queue.close()
-  for (const job of jobs) {
-    if (json) {
-      console.log(JSON.stringify(job))
-    } else {
-      const target = job.to ?? `chat:${job.chatId ?? job.chatIdentifier ?? job.chatGuid}`
-      const text = (job.text ?? "(attachment)").slice(0, 50)
-      console.log(`[${job.id}] ${job.status} → ${target}: ${text} (attempt ${job.attempts}/${job.maxAttempts})`)
-    }
-  }
-}
-
 async function rpcCmd() {
   const db = openDB()
   const bridge = createBridge()
@@ -376,6 +281,22 @@ function buildFilter() {
     start: args["--start"],
     end: args["--end"],
   })
+}
+
+function sendInput(service: ReturnType<typeof parseService>) {
+  const positional = args._.slice(1).map(String)
+  const text = args["--text"] ?? (positional.length > 1 ? positional.slice(1).join(" ") : undefined)
+
+  return {
+    to: args["--to"] ?? positional[0],
+    chatId: args["--chat-id"],
+    chatIdentifier: args["--chat-identifier"],
+    chatGuid: args["--chat-guid"],
+    text,
+    file: args["--file"],
+    service,
+    region: args["--region"],
+  }
 }
 
 function bail(msg: string): never {
@@ -403,10 +324,7 @@ Commands:
   chats       List recent conversations
   history     Show messages for a chat
   watch       Stream incoming messages
-  send        Send a message (text and/or attachment)
-  enqueue     Queue a message for background delivery (same args as send)
-  worker      Run background worker to process the message queue
-  queue       List queued jobs (subcommands: counts, purge)
+  send        Send a message (flags or: send <target> <text>)
   react       Send a tapback reaction (love, like, dislike, laugh, emphasis, question)
   cleanup     Remove old staged attachments
   typing      Control typing indicator

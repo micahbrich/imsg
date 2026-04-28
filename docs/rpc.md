@@ -11,8 +11,7 @@ JSON-RPC 2.0 server over stdin/stdout. No daemon, no TCP port — the caller spa
 ## Lifecycle
 
 - Caller spawns `imsg-plus rpc [--no-auto-read] [--no-auto-typing] [--verbose]`
-- Process stays alive for watch subscriptions + send queue
-- Embedded queue worker runs automatically (no separate daemon)
+- Process stays alive for watch subscriptions + direct sends
 - Closes when stdin closes
 
 ## Methods
@@ -61,7 +60,7 @@ Result: `{ "ok": true }`
 
 ### `send`
 
-Enqueues a message for delivery via the built-in queue worker. Returns immediately.
+Sends immediately with automatic idempotency and explicit outcomes.
 
 Params (direct):
 - `to` (string) — phone number or email
@@ -69,19 +68,23 @@ Params (direct):
 - `file` (string, optional)
 - `service` ("imessage" | "sms" | "auto", default "auto")
 - `region` (string, default "US")
-- `idempotency_key` (string, optional — prevents duplicate sends)
+- `idempotency_key` (string, optional — auto-generated when omitted; auto keys dedupe for 10s, explicit keys for 120s)
 
 Params (group/existing chat):
 - `chat_id` or `chat_identifier` or `chat_guid` (one required; `chat_id` preferred)
 - `text` / `file` / `service` / `region` as above
 
-Result: `{ "ok": true, "queued": true, "id": 1, "duplicate": false }`
+Result (`sent`):
+`{ "ok": true, "outcome": "sent", "duplicate": false, "idempotency_key": "...", "message_id": 123, "id": 123, "guid": "..." }`
 
-### `queue.status`
+Result (`duplicate`):
+`{ "ok": true, "outcome": "duplicate", "duplicate": true, "idempotency_key": "...", "in_flight": false, "previous_status": "sent", "reason": "recent_sent" }`
 
-No params.
+Error outcome (`unknown_outcome`):
+JSON-RPC error with `error.data.outcome = "unknown_outcome"`
 
-Result: `{ "pending": 0, "processing": 0, "sent": 5, "failed": 0 }`
+Error outcome (`failed`):
+JSON-RPC error with `error.data.outcome = "failed"`
 
 ### `messages.react`
 
@@ -120,8 +123,6 @@ Server-initiated notifications (no `id` field):
 | Method | Params | Trigger |
 |---|---|---|
 | `message` | `{ subscription, message: Message }` | New message in watched chat |
-| `queue.sent` | `{ job_id, idempotency_key, message_id?, guid? }` | Queued message delivered |
-| `queue.failed` | `{ job_id, idempotency_key, error, status, attempts, max_attempts }` | Queued message failed |
 | `stale_send` | `{ subscription, message }` | Sent message not in chat.db after threshold |
 | `heartbeat` | `{ subscription }` | Keep-alive (every 15 min) |
 
@@ -171,5 +172,4 @@ Server-initiated notifications (no `id` field):
 {"jsonrpc":"2.0","id":2,"method":"send","params":{"to":"+14155551212","text":"hello","idempotency_key":"abc-123"}}
 {"jsonrpc":"2.0","id":3,"method":"watch.subscribe","params":{"attachments":true}}
 {"jsonrpc":"2.0","id":4,"method":"typing.set","params":{"handle":"+14155551212","state":"on"}}
-{"jsonrpc":"2.0","id":5,"method":"queue.status","params":{}}
 ```
